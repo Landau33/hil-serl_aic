@@ -5,24 +5,17 @@ import gymnasium as gym
 import jax
 import jax.numpy as jnp
 
+from serl_launcher.networks.reward_classifier import load_classifier_func
 from serl_launcher.wrappers.chunking import ChunkingWrapper
 from serl_launcher.wrappers.serl_obs_wrappers import SERLObsWrapper
-from serl_launcher.networks.reward_classifier import load_classifier_func
 
-from experiments.config import DefaultTrainingConfig
 from experiments.aic_cable_insertion.wrapper import AICCableInsertionEnv
+from experiments.config import DefaultTrainingConfig
 
 
 @dataclass(frozen=True)
 class EnvConfig:
-    """AIC task settings for HIL-SERL training.
-
-    This is intentionally aligned with the runtime-side AIC HIL-SERL adapter:
-    - images: left/center/right wrist cameras, resized to 128x128
-    - state: 46-D vector composed from TCP, joints, and wrist wrench signals
-
-    The live ROS bridge is left to the wrapper implementation.
-    """
+    """AIC task settings for HIL-SERL training."""
 
     image_width: int = 128
     image_height: int = 128
@@ -38,14 +31,43 @@ class EnvConfig:
         "wrist_force",
         "wrist_torque",
     )
+
     action_scale_linear: float = 0.01
     action_scale_angular: float = 0.06
+    control_frame_id: str = "base_link"
     max_episode_length: int = 100
     policy_control_period_sec: float = 0.10
     reward_classifier_threshold: float = 0.85
     display_image: bool = True
-    ros_domain_id: str | None = None
     observation_timeout_sec: float = 1.0
+    post_reset_settle_sec: float = 1.0
+
+    use_sim_time: bool = True
+    observation_topic: str = "observations"
+    pose_command_topic: str = "/aic_controller/pose_commands"
+    change_target_mode_service: str = "/aic_controller/change_target_mode"
+    tare_force_torque_service: str = "/aic_controller/tare_force_torque_sensor"
+    reset_joints_service: str = "/scoring/reset_joints"
+
+    enable_tare_on_reset: bool = True
+    enable_joint_reset: bool = True
+    require_manual_reset_ack: bool = False
+    reset_prompt: str = (
+        "Reset episode state if needed, then press Enter to continue..."
+    )
+    home_joint_names: tuple[str, ...] = (
+        "shoulder_pan_joint",
+        "shoulder_lift_joint",
+        "elbow_joint",
+        "wrist_1_joint",
+        "wrist_2_joint",
+        "wrist_3_joint",
+    )
+    home_joint_positions: tuple[float, ...] = (0.6, -1.3, -1.9, -1.57, 1.57, 0.6)
+
+    enable_keyboard_intervention: bool = True
+    intervention_linear_velocity: float = 0.01
+    intervention_angular_velocity: float = 0.06
 
 
 class TrainConfig(DefaultTrainingConfig):
