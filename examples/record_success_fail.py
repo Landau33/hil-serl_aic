@@ -5,7 +5,10 @@ import numpy as np
 import pickle as pkl
 import datetime
 from absl import app, flags
-from pynput import keyboard
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pynput import keyboard
 
 from experiments.mappings import CONFIG_MAPPING
 
@@ -25,6 +28,11 @@ def on_press(key):
 
 def main(_):
     global success_key
+    try:
+        from pynput import keyboard
+    except ImportError as exc:
+        raise RuntimeError("pynput requires a graphical session. Set DISPLAY or run under X11.") from exc
+
     listener = keyboard.Listener(
         on_press=on_press)
     listener.start()

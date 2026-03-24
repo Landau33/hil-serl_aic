@@ -315,7 +315,6 @@ class _AICLiveBackend:
         import rclpy
         from aic_control_interfaces.msg import MotionUpdate, TargetMode, TrajectoryGenerationMode
         from aic_control_interfaces.srv import ChangeTargetMode
-        from aic_engine_interfaces.srv import ResetJoints
         from aic_model_interfaces.msg import Observation
         from geometry_msgs.msg import Twist, Vector3, Wrench
         from rclpy.executors import MultiThreadedExecutor
@@ -330,7 +329,14 @@ class _AICLiveBackend:
         self._TargetMode = TargetMode
         self._TrajectoryGenerationMode = TrajectoryGenerationMode
         self._ChangeTargetMode = ChangeTargetMode
-        self._ResetJoints = ResetJoints
+        self._ResetJoints = None
+        try:
+            from aic_engine_interfaces.srv import ResetJoints
+        except ImportError:
+            self._node_reset_joints_available = False
+        else:
+            self._ResetJoints = ResetJoints
+            self._node_reset_joints_available = True
         self._Observation = Observation
         self._Twist = Twist
         self._Vector3 = Vector3
@@ -383,10 +389,16 @@ class _AICLiveBackend:
             self._Trigger,
             self.config.tare_force_torque_service,
         )
-        self._reset_joints_client = self._node.create_client(
-            self._ResetJoints,
-            self.config.reset_joints_service,
-        )
+        self._reset_joints_client = None
+        if self._node_reset_joints_available:
+            self._reset_joints_client = self._node.create_client(
+                self._ResetJoints,
+                self.config.reset_joints_service,
+            )
+        else:
+            self._node.get_logger().warn(
+                "aic_engine_interfaces.srv.ResetJoints unavailable; joint reset disabled."
+            )
 
         # 初始化键盘干预并切换到笛卡尔模式
         self._intervention = self._make_intervention()
@@ -409,7 +421,7 @@ class _AICLiveBackend:
         if self.config.enable_tare_on_reset:
             self._maybe_tare_force_torque_sensor()
 
-        if self.config.enable_joint_reset:
+        if self.config.enable_joint_reset and self._reset_joints_client is not None:
             self._maybe_reset_joints()
 
         if self.config.require_manual_reset_ack:
@@ -459,7 +471,7 @@ class _AICLiveBackend:
         last_seq = self._obs_seq if require_new else None
         if require_new:
             # 等待新观测的逻辑
-            deadline = None if timeout_sec is None else time.time() + deadline
+            deadline = None if timeout_sec is None else time.time() + timeout_sec
             while True:
                 with self._obs_lock:
                     if self._latest_obs is not None and self._obs_seq > last_seq:
