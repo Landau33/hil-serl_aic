@@ -12,7 +12,7 @@ import os
 import copy
 import glob
 import pickle as pkl
-from gymnasium.wrappers.record_episode_statistics import RecordEpisodeStatistics
+from gymnasium.wrappers.common import RecordEpisodeStatistics
 from pynput import keyboard
 
 from serl_launcher.agents.continuous.bc import BCAgent

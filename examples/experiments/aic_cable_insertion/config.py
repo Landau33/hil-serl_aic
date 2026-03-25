@@ -68,6 +68,7 @@ class EnvConfig:
     enable_keyboard_intervention: bool = True
     intervention_linear_velocity: float = 0.01
     intervention_angular_velocity: float = 0.06
+    reset_resume_key: str = "r"
 
 
 class TrainConfig(DefaultTrainingConfig):

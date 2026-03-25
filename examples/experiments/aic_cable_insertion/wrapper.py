@@ -149,7 +149,8 @@ class AICCableInsertionEnv(gym.Env):
         """
         super().reset(seed=seed)
         self._episode_step = 0
-        self._last_action[:] = 0.0
+        self._last_action = np.zeros((6,), dtype=np.float32)
+        wait_for_reset_resume = bool(options.get("wait_for_reset_resume", False)) if options else False
 
         if self.fake_env:
             self._fake = self._sample_fake_initial_state()
@@ -157,7 +158,7 @@ class AICCableInsertionEnv(gym.Env):
             return obs, {"succeed": 0}
 
         # 真实环境：调用后端重置并获取初始观测
-        self._live.reset_task()
+        self._live.reset_task(wait_for_reset_resume=wait_for_reset_resume)
         obs = self._live.get_observation(timeout_sec=self.config.observation_timeout_sec)
         return obs, {"succeed": 0}
 
@@ -188,6 +189,11 @@ class AICCableInsertionEnv(gym.Env):
         """关闭环境并释放资源。"""
         if self._live is not None:
             self._live.close()
+
+    def notify_reset_resume_keypress(self):
+        """通知环境收到了一次 reset 恢复按键。"""
+        if self._live is not None:
+            self._live.notify_reset_resume_keypress()
 
     def _step_fake(self, action: np.ndarray):
         """仿真模式下的步进逻辑。
@@ -367,6 +373,8 @@ class _AICLiveBackend:
         self._obs_event = threading.Event()
         self._latest_obs = None
         self._obs_seq = 0
+        self._reset_resume_count = 0
+        self._reset_resume_condition = threading.Condition()
 
         # 创建订阅者和发布者
         self._observation_sub = self._node.create_subscription(
@@ -405,7 +413,7 @@ class _AICLiveBackend:
         self._ensure_cartesian_mode()
         self._wait_for_initial_observation()
 
-    def reset_task(self):
+    def reset_task(self, wait_for_reset_resume: bool = False):
         """重置任务到初始状态。
         
         执行步骤：
@@ -426,6 +434,9 @@ class _AICLiveBackend:
 
         if self.config.require_manual_reset_ack:
             input(self.config.reset_prompt)
+
+        if wait_for_reset_resume:
+            self._wait_for_reset_resume_key()
 
         time.sleep(self.config.post_reset_settle_sec)
         self._publish_zero_twist()
@@ -728,6 +739,22 @@ class _AICLiveBackend:
         """等待初始观测到达。"""
         self.get_observation(timeout_sec=max(1.0, self.config.observation_timeout_sec))
 
+    def notify_reset_resume_keypress(self):
+        """记录一次来自外部的 reset 恢复按键。"""
+        with self._reset_resume_condition:
+            self._reset_resume_count += 1
+            self._reset_resume_condition.notify_all()
+
+    def _wait_for_reset_resume_key(self):
+        """等待再次按下 reset 键，结束 reset。"""
+        self._node.get_logger().info(
+            f"Waiting for reset resume key '{self.config.reset_resume_key}'"
+        )
+        with self._reset_resume_condition:
+            start_count = self._reset_resume_count
+            while self._reset_resume_count == start_count:
+                self._reset_resume_condition.wait()
+
     @staticmethod
     def _clone_obs(obs):
         """深拷贝观测字典以避免引用问题。
@@ -769,11 +796,11 @@ class _KeyboardIntervention:
     
     支持按键：
     - D/A: X 轴正负方向
-    - W/S: Y 轴正负方向
-    - R/F: Z 轴正负方向
-    - W/S(大写): Rx 旋转
-    - A/D(大写): Ry 旋转
-    - E/Q: Rz 旋转
+    - W/S: Y 轴负正方向
+    - J/K: Z 轴负正方向
+    - Q/E: Rx 正负方向
+    - U/I: Ry 负正方向
+    - O/P: Rz 正负方向
     """
 
     _KEY_MAPPINGS = {
@@ -781,14 +808,14 @@ class _KeyboardIntervention:
         "a": np.array([-1, 0, 0, 0, 0, 0], dtype=np.float32), # -X
         "w": np.array([0, -1, 0, 0, 0, 0], dtype=np.float32), # +Y
         "s": np.array([0, 1, 0, 0, 0, 0], dtype=np.float32),  # -Y
-        "r": np.array([0, 0, -1, 0, 0, 0], dtype=np.float32), # +Z
-        "f": np.array([0, 0, 1, 0, 0, 0], dtype=np.float32),  # -Z
-        "W": np.array([0, 0, 0, 1, 0, 0], dtype=np.float32),  # +Rx
-        "S": np.array([0, 0, 0, -1, 0, 0], dtype=np.float32), # -Rx
-        "A": np.array([0, 0, 0, 0, -1, 0], dtype=np.float32), # +Ry
-        "D": np.array([0, 0, 0, 0, 1, 0], dtype=np.float32),  # -Ry
-        "e": np.array([0, 0, 0, 0, 0, 1], dtype=np.float32),  # +Rz
-        "q": np.array([0, 0, 0, 0, 0, -1], dtype=np.float32), # -Rz
+        "j": np.array([0, 0, -1, 0, 0, 0], dtype=np.float32), # +Z
+        "k": np.array([0, 0, 1, 0, 0, 0], dtype=np.float32),  # -Z
+        "q": np.array([0, 0, 0, 1, 0, 0], dtype=np.float32),  # +Rx
+        "e": np.array([0, 0, 0, -1, 0, 0], dtype=np.float32), # -Rx
+        "u": np.array([0, 0, 0, 0, -1, 0], dtype=np.float32), # +Ry
+        "i": np.array([0, 0, 0, 0, 1, 0], dtype=np.float32),  # -Ry
+        "o": np.array([0, 0, 0, 0, 0, 1], dtype=np.float32),  # +Rz
+        "p": np.array([0, 0, 0, 0, 0, -1], dtype=np.float32), # -Rz
     }
 
     def __init__(self):

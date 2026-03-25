@@ -18,16 +18,25 @@ flags.DEFINE_integer("successes_needed", 200, "Number of successful transistions
 
 
 success_key = False
+reset_key = False
+active_env = None
+
+
 def on_press(key):
-    global success_key
+    global success_key, reset_key, active_env
     try:
-        if str(key) == 'Key.space':
+        if hasattr(key, "char") and key.char == "h":
             success_key = True
+        elif hasattr(key, "char") and key.char == "r":
+            reset_key = True
+            if active_env is not None and hasattr(active_env.unwrapped, "notify_reset_resume_keypress"):
+                active_env.unwrapped.notify_reset_resume_keypress()
     except AttributeError:
         pass
 
+
 def main(_):
-    global success_key
+    global success_key, reset_key, active_env
     try:
         from pynput import keyboard
     except ImportError as exc:
@@ -39,6 +48,7 @@ def main(_):
     assert FLAGS.exp_name in CONFIG_MAPPING, 'Experiment folder not found.'
     config = CONFIG_MAPPING[FLAGS.exp_name]()
     env = config.get_environment(fake_env=False, save_video=False, classifier=False)
+    active_env = env
 
     obs, _ = env.reset()
     successes = []
@@ -70,8 +80,11 @@ def main(_):
         else:
             failures.append(transition)
 
-        if done or truncated:
-            obs, _ = env.reset()
+        if reset_key:
+            reset_key = False
+            obs, _ = env.reset(options={"wait_for_reset_resume": True})
+            reset_key = False
+            print("Reset finished. Resuming recording.")
 
     if not os.path.exists("./classifier_data"):
         os.makedirs("./classifier_data")
@@ -85,6 +98,7 @@ def main(_):
     with open(file_name, "wb") as f:
         pkl.dump(failures, f)
         print(f"saved {len(failures)} failure transitions to {file_name}")
+    active_env = None
         
 if __name__ == "__main__":
     app.run(main)
