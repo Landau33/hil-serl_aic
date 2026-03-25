@@ -510,6 +510,8 @@ class _AICLiveBackend:
             self._intervention.close()
 
         self._executor.shutdown()
+        if self._spin_thread.is_alive():
+            self._spin_thread.join(timeout=1.0)
         self._node.destroy_node()
         if self._initialized_rclpy and self._rclpy.ok():
             self._rclpy.shutdown()

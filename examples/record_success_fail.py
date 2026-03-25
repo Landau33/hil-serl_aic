@@ -45,60 +45,69 @@ def main(_):
     listener = keyboard.Listener(
         on_press=on_press)
     listener.start()
-    assert FLAGS.exp_name in CONFIG_MAPPING, 'Experiment folder not found.'
-    config = CONFIG_MAPPING[FLAGS.exp_name]()
-    env = config.get_environment(fake_env=False, save_video=False, classifier=False)
-    active_env = env
+    env = None
+    pbar = None
+    try:
+        assert FLAGS.exp_name in CONFIG_MAPPING, 'Experiment folder not found.'
+        config = CONFIG_MAPPING[FLAGS.exp_name]()
+        env = config.get_environment(fake_env=False, save_video=False, classifier=False)
+        active_env = env
 
-    obs, _ = env.reset()
-    successes = []
-    failures = []
-    success_needed = FLAGS.successes_needed
-    pbar = tqdm(total=success_needed)
-    
-    while len(successes) < success_needed:
-        actions = np.zeros(env.action_space.sample().shape) 
-        next_obs, rew, done, truncated, info = env.step(actions)
-        if "intervene_action" in info:
-            actions = info["intervene_action"]
+        obs, _ = env.reset()
+        successes = []
+        failures = []
+        success_needed = FLAGS.successes_needed
+        pbar = tqdm(total=success_needed)
+        
+        while len(successes) < success_needed:
+            actions = np.zeros(env.action_space.sample().shape) 
+            next_obs, rew, done, truncated, info = env.step(actions)
+            if "intervene_action" in info:
+                actions = info["intervene_action"]
 
-        transition = copy.deepcopy(
-            dict(
-                observations=obs,
-                actions=actions,
-                next_observations=next_obs,
-                rewards=rew,
-                masks=1.0 - done,
-                dones=done,
+            transition = copy.deepcopy(
+                dict(
+                    observations=obs,
+                    actions=actions,
+                    next_observations=next_obs,
+                    rewards=rew,
+                    masks=1.0 - done,
+                    dones=done,
+                )
             )
-        )
-        obs = next_obs
-        if success_key:
-            successes.append(transition)
-            pbar.update(1)
-            success_key = False
-        else:
-            failures.append(transition)
+            obs = next_obs
+            if success_key:
+                successes.append(transition)
+                pbar.update(1)
+                success_key = False
+            else:
+                failures.append(transition)
 
-        if reset_key:
-            reset_key = False
-            obs, _ = env.reset(options={"wait_for_reset_resume": True})
-            reset_key = False
-            print("Reset finished. Resuming recording.")
+            if reset_key:
+                reset_key = False
+                obs, _ = env.reset(options={"wait_for_reset_resume": True})
+                reset_key = False
+                print("Reset finished. Resuming recording.")
 
-    if not os.path.exists("./classifier_data"):
-        os.makedirs("./classifier_data")
-    uuid = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    file_name = f"./classifier_data/{FLAGS.exp_name}_{success_needed}_success_images_{uuid}.pkl"
-    with open(file_name, "wb") as f:
-        pkl.dump(successes, f)
-        print(f"saved {success_needed} successful transitions to {file_name}")
+        if not os.path.exists("./classifier_data"):
+            os.makedirs("./classifier_data")
+        uuid = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        file_name = f"./classifier_data/{FLAGS.exp_name}_{success_needed}_success_images_{uuid}.pkl"
+        with open(file_name, "wb") as f:
+            pkl.dump(successes, f)
+            print(f"saved {success_needed} successful transitions to {file_name}")
 
-    file_name = f"./classifier_data/{FLAGS.exp_name}_failure_images_{uuid}.pkl"
-    with open(file_name, "wb") as f:
-        pkl.dump(failures, f)
-        print(f"saved {len(failures)} failure transitions to {file_name}")
-    active_env = None
+        file_name = f"./classifier_data/{FLAGS.exp_name}_failure_images_{uuid}.pkl"
+        with open(file_name, "wb") as f:
+            pkl.dump(failures, f)
+            print(f"saved {len(failures)} failure transitions to {file_name}")
+    finally:
+        active_env = None
+        if pbar is not None:
+            pbar.close()
+        listener.stop()
+        if env is not None:
+            env.close()
         
 if __name__ == "__main__":
     app.run(main)

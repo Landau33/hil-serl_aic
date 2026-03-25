@@ -22,12 +22,24 @@ FLAGS = flags.FLAGS
 flags.DEFINE_string("exp_name", None, "Name of experiment corresponding to folder.")
 flags.DEFINE_integer("num_epochs", 150, "Number of training epochs.")
 flags.DEFINE_integer("batch_size", 256, "Batch size.")
+flags.DEFINE_string(
+    "dataset_dir",
+    None,
+    "Directory containing classifier_data pickles. Defaults to ./classifier_data under cwd.",
+)
+flags.DEFINE_string(
+    "checkpoint_dir",
+    None,
+    "Directory to save classifier checkpoints. Defaults to ./classifier_ckpt under cwd.",
+)
 
 
 def main(_):
     assert FLAGS.exp_name in CONFIG_MAPPING, 'Experiment folder not found.'
     config = CONFIG_MAPPING[FLAGS.exp_name]()
     env = config.get_environment(fake_env=True, save_video=False, classifier=False)
+    dataset_dir = os.path.abspath(FLAGS.dataset_dir or os.path.join(os.getcwd(), "classifier_data"))
+    checkpoint_dir = os.path.abspath(FLAGS.checkpoint_dir or os.path.join(os.getcwd(), "classifier_ckpt"))
 
     devices = jax.local_devices()
     sharding = jax.sharding.PositionalSharding(devices)
@@ -40,7 +52,7 @@ def main(_):
         include_label=True,
     )
 
-    success_paths = glob.glob(os.path.join(os.getcwd(), "classifier_data", "*success*.pkl"))
+    success_paths = glob.glob(os.path.join(dataset_dir, "*success*.pkl"))
     for path in success_paths:
         success_data = pkl.load(open(path, "rb"))
         for trans in success_data:
@@ -64,7 +76,7 @@ def main(_):
         capacity=50000,
         include_label=True,
     )
-    failure_paths = glob.glob(os.path.join(os.getcwd(), "classifier_data", "*failure*.pkl"))
+    failure_paths = glob.glob(os.path.join(dataset_dir, "*failure*.pkl"))
     for path in failure_paths:
         failure_data = pkl.load(
             open(path, "rb")
@@ -83,8 +95,14 @@ def main(_):
         device=sharding.replicate(),
     )
 
+    print(f"dataset_dir: {dataset_dir}")
     print(f"failed buffer size: {len(neg_buffer)}")
     print(f"success buffer size: {len(pos_buffer)}")
+    if len(pos_buffer) == 0 or len(neg_buffer) == 0:
+        raise ValueError(
+            f"Dataset is empty or one-sided. success={len(pos_buffer)} failure={len(neg_buffer)} "
+            f"under {dataset_dir}"
+        )
 
     rng = jax.random.PRNGKey(0)
     rng, key = jax.random.split(rng)
@@ -151,7 +169,7 @@ def main(_):
         )
 
     checkpoints.save_checkpoint(
-        os.path.join(os.getcwd(), "classifier_ckpt/"),
+        checkpoint_dir,
         classifier,
         step=FLAGS.num_epochs,
         overwrite=True,
