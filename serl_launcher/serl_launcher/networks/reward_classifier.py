@@ -49,6 +49,7 @@ def create_classifier(
     sample: Dict,
     image_keys: List[str],
     n_way: int = 2,
+    learning_rate: float = 1e-4,
 ):
     pretrained_encoder = resnetv1_configs["resnetv1-10-frozen"](
         pre_pooling=True,
@@ -78,7 +79,7 @@ def create_classifier(
     classifier = TrainState.create(
         apply_fn=classifier_def.apply,
         params=params,
-        tx=optax.adam(learning_rate=1e-4),
+        tx=optax.adam(learning_rate=learning_rate),
     )
 
     file_name = "resnet10_params.pkl"
@@ -145,6 +146,12 @@ def load_classifier_func(
             and returns the logits of the classifier.
     """
     classifier = create_classifier(key, sample, image_keys, n_way=n_way)
+    resolved_checkpoint_path = checkpoint_path
+    if os.path.isdir(checkpoint_path):
+        latest_checkpoint = checkpoints.latest_checkpoint(checkpoint_path)
+        if latest_checkpoint is not None:
+            resolved_checkpoint_path = latest_checkpoint
+    print(f"Loading classifier checkpoint from: {resolved_checkpoint_path}")
     classifier = checkpoints.restore_checkpoint(
         checkpoint_path,
         target=classifier,
