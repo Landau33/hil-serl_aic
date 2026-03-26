@@ -1,3 +1,10 @@
 # Python cache
 __pycache__/
 .pytest_cache/
+
+# Training artifacts
+examples/classifier_ckpt/
+examples/demo_data/
+examples/experiments/*/checkpoint*/
+examples/experiments/*/checkpoints*/
+examples/experiments/*/classifier_ckpt/
