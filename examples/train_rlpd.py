@@ -11,6 +11,7 @@ from flax.training import checkpoints
 import os
 import copy
 import pickle as pkl
+from typing import TYPE_CHECKING
 from gymnasium.wrappers.common import RecordEpisodeStatistics
 from natsort import natsorted
 
@@ -33,6 +34,9 @@ from serl_launcher.utils.launcher import (
 from serl_launcher.data.data_store import MemoryEfficientReplayBufferDataStore
 
 from experiments.mappings import CONFIG_MAPPING
+
+if TYPE_CHECKING:
+    from pynput import keyboard
 
 FLAGS = flags.FLAGS
 
@@ -61,6 +65,21 @@ def print_green(x):
     return print("\033[92m {}\033[00m".format(x))
 
 
+active_env = None
+reset_key = False
+
+
+def on_press(key):
+    global active_env, reset_key
+    try:
+        if hasattr(key, "char") and key.char == "r":
+            reset_key = True
+            if active_env is not None and hasattr(active_env.unwrapped, "notify_reset_resume_keypress"):
+                active_env.unwrapped.notify_reset_resume_keypress()
+    except AttributeError:
+        pass
+
+
 ##############################################################################
 
 
@@ -68,175 +87,222 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
     """
     This is the actor loop, which runs when "--actor" is set to True.
     """
-    if FLAGS.eval_checkpoint_step:
-        success_counter = 0
-        time_list = []
+    global active_env, reset_key
+    try:
+        from pynput import keyboard
+    except ImportError as exc:
+        raise RuntimeError("pynput requires a graphical session. Set DISPLAY or run under X11.") from exc
 
-        ckpt = checkpoints.restore_checkpoint(
-            os.path.abspath(FLAGS.checkpoint_path),
-            agent.state,
-            step=FLAGS.eval_checkpoint_step,
+    listener = keyboard.Listener(on_press=on_press)
+    listener.start()
+    active_env = env
+    try:
+        if FLAGS.eval_checkpoint_step:
+            success_counter = 0
+            time_list = []
+
+            ckpt = checkpoints.restore_checkpoint(
+                os.path.abspath(FLAGS.checkpoint_path),
+                agent.state,
+                step=FLAGS.eval_checkpoint_step,
+            )
+            agent = agent.replace(state=ckpt)
+
+            for episode in range(FLAGS.eval_n_trajs):
+                obs, _ = env.reset(options={"wait_for_reset_resume": True})
+                print("Reset finished. Resuming actor rollout.")
+                done = False
+                start_time = time.time()
+                while not done:
+                    sampling_rng, key = jax.random.split(sampling_rng)
+                    actions = agent.sample_actions(
+                        observations=jax.device_put(obs),
+                        argmax=False,
+                        seed=key
+                    )
+                    actions = np.asarray(jax.device_get(actions))
+
+                    next_obs, reward, done, truncated, info = env.step(actions)
+                    obs = next_obs
+
+                    if done:
+                        if reward:
+                            dt = time.time() - start_time
+                            time_list.append(dt)
+                            print(dt)
+
+                        success_counter += reward
+                        print(reward)
+                        print(f"{success_counter}/{episode + 1}")
+                        print("Episode finished. Press 'r' to begin reset.")
+                        while not reset_key:
+                            time.sleep(0.05)
+                        reset_key = False
+
+            print(f"success rate: {success_counter / FLAGS.eval_n_trajs}")
+            print(f"average time: {np.mean(time_list)}")
+            return  # after done eval, return and exit
+    
+        start_step = (
+            int(os.path.basename(natsorted(glob.glob(os.path.join(FLAGS.checkpoint_path, "buffer/*.pkl")))[-1])[12:-4]) + 1
+            if FLAGS.checkpoint_path and os.path.exists(FLAGS.checkpoint_path)
+            else 0
         )
-        agent = agent.replace(state=ckpt)
 
-        for episode in range(FLAGS.eval_n_trajs):
-            obs, _ = env.reset()
-            done = False
-            start_time = time.time()
-            while not done:
-                sampling_rng, key = jax.random.split(sampling_rng)
-                actions = agent.sample_actions(
-                    observations=jax.device_put(obs),
-                    argmax=False,
-                    seed=key
-                )
-                actions = np.asarray(jax.device_get(actions))
+        datastore_dict = {
+            "actor_env": data_store,
+            "actor_env_intvn": intvn_data_store,
+        }
+
+        client = TrainerClient(
+            "actor_env",
+            FLAGS.ip,
+            make_trainer_config(),
+            data_stores=datastore_dict,
+            wait_for_server=True,
+            timeout_ms=3000,
+        )
+
+        # Function to update the agent with new params
+        def update_params(params):
+            nonlocal agent
+            agent = agent.replace(state=agent.state.replace(params=params))
+
+        client.recv_network_callback(update_params)
+
+        transitions = []
+        demo_transitions = []
+
+        obs, _ = env.reset(options={"wait_for_reset_resume": True})
+        print("Reset finished. Resuming actor rollout.")
+        done = False
+
+        # training loop
+        timer = Timer()
+        running_return = 0.0
+        already_intervened = False
+        intervention_count = 0
+        intervention_steps = 0
+        waiting_for_manual_reset = False
+        pbar = tqdm.tqdm(range(start_step, config.max_steps), dynamic_ncols=True)
+        for step in pbar:
+            timer.tick("total")
+
+            if waiting_for_manual_reset:
+                if reset_key:
+                    reset_key = False
+                    running_return = 0.0
+                    intervention_count = 0
+                    intervention_steps = 0
+                    already_intervened = False
+                    client.update()
+                    print("Reset requested. Waiting for reset resume key 'r'.")
+                    obs, _ = env.reset(options={"wait_for_reset_resume": True})
+                    reset_key = False
+                    done = False
+                    truncated = False
+                    waiting_for_manual_reset = False
+                    print("Reset finished. Resuming actor rollout.")
+                timer.tock("total")
+                if step % config.log_period == 0:
+                    stats = {"timer": timer.get_average_times()}
+                    client.request("send-stats", stats)
+                time.sleep(0.05)
+                continue
+
+            with timer.context("sample_actions"):
+                if step < config.random_steps:
+                    actions = env.action_space.sample()
+                else:
+                    sampling_rng, key = jax.random.split(sampling_rng)
+                    actions = agent.sample_actions(
+                        observations=jax.device_put(obs),
+                        seed=key,
+                        argmax=False,
+                    )
+                    actions = np.asarray(jax.device_get(actions))
+
+            # Step environment
+            with timer.context("step_env"):
 
                 next_obs, reward, done, truncated, info = env.step(actions)
-                obs = next_obs
+                if "left" in info:
+                    info.pop("left")
+                if "right" in info:
+                    info.pop("right")
 
-                if done:
-                    if reward:
-                        dt = time.time() - start_time
-                        time_list.append(dt)
-                        print(dt)
+                # override the action with the intervention action
+                if "intervene_action" in info:
+                    actions = info.pop("intervene_action")
+                    intervention_steps += 1
+                    if not already_intervened:
+                        intervention_count += 1
+                        print(f"Manual intervention started: action={actions}")
+                    already_intervened = True
+                else:
+                    if already_intervened:
+                        print("Manual intervention released. Policy control resumed.")
+                    already_intervened = False
 
-                    success_counter += reward
-                    print(reward)
-                    print(f"{success_counter}/{episode + 1}")
-
-        print(f"success rate: {success_counter / FLAGS.eval_n_trajs}")
-        print(f"average time: {np.mean(time_list)}")
-        return  # after done eval, return and exit
-    
-    start_step = (
-        int(os.path.basename(natsorted(glob.glob(os.path.join(FLAGS.checkpoint_path, "buffer/*.pkl")))[-1])[12:-4]) + 1
-        if FLAGS.checkpoint_path and os.path.exists(FLAGS.checkpoint_path)
-        else 0
-    )
-
-    datastore_dict = {
-        "actor_env": data_store,
-        "actor_env_intvn": intvn_data_store,
-    }
-
-    client = TrainerClient(
-        "actor_env",
-        FLAGS.ip,
-        make_trainer_config(),
-        data_stores=datastore_dict,
-        wait_for_server=True,
-        timeout_ms=3000,
-    )
-
-    # Function to update the agent with new params
-    def update_params(params):
-        nonlocal agent
-        agent = agent.replace(state=agent.state.replace(params=params))
-
-    client.recv_network_callback(update_params)
-
-    transitions = []
-    demo_transitions = []
-
-    obs, _ = env.reset()
-    done = False
-
-    # training loop
-    timer = Timer()
-    running_return = 0.0
-    already_intervened = False
-    intervention_count = 0
-    intervention_steps = 0
-
-    pbar = tqdm.tqdm(range(start_step, config.max_steps), dynamic_ncols=True)
-    for step in pbar:
-        timer.tick("total")
-
-        with timer.context("sample_actions"):
-            if step < config.random_steps:
-                actions = env.action_space.sample()
-            else:
-                sampling_rng, key = jax.random.split(sampling_rng)
-                actions = agent.sample_actions(
-                    observations=jax.device_put(obs),
-                    seed=key,
-                    argmax=False,
+                running_return += reward
+                transition = dict(
+                    observations=obs,
+                    actions=actions,
+                    next_observations=next_obs,
+                    rewards=reward,
+                    masks=1.0 - done,
+                    dones=done,
                 )
-                actions = np.asarray(jax.device_get(actions))
+                if 'grasp_penalty' in info:
+                    transition['grasp_penalty']= info['grasp_penalty']
+                data_store.insert(transition)
+                transitions.append(copy.deepcopy(transition))
+                if already_intervened:
+                    intvn_data_store.insert(transition)
+                    demo_transitions.append(copy.deepcopy(transition))
 
-        # Step environment
-        with timer.context("step_env"):
+                obs = next_obs
+                if done or truncated:
+                    print(
+                        "Episode end:"
+                        f" done={done}, truncated={truncated},"
+                        f" reward={reward},"
+                        f" succeed={info.get('succeed', 'N/A')},"
+                        f" classifier_prob={info.get('classifier_prob', 'N/A')}"
+                    )
+                    info["episode"]["intervention_count"] = intervention_count
+                    info["episode"]["intervention_steps"] = intervention_steps
+                    stats = {"environment": info}  # send stats to the learner to log
+                    client.request("send-stats", stats)
+                    pbar.set_description(f"last return: {running_return}")
+                    print("Episode finished. Press 'r' to begin reset.")
+                    waiting_for_manual_reset = True
 
-            next_obs, reward, done, truncated, info = env.step(actions)
-            if "left" in info:
-                info.pop("left")
-            if "right" in info:
-                info.pop("right")
+            if step > 0 and config.buffer_period > 0 and step % config.buffer_period == 0:
+                # dump to pickle file
+                buffer_path = os.path.join(FLAGS.checkpoint_path, "buffer")
+                demo_buffer_path = os.path.join(FLAGS.checkpoint_path, "demo_buffer")
+                if not os.path.exists(buffer_path):
+                    os.makedirs(buffer_path)
+                if not os.path.exists(demo_buffer_path):
+                    os.makedirs(demo_buffer_path)
+                with open(os.path.join(buffer_path, f"transitions_{step}.pkl"), "wb") as f:
+                    pkl.dump(transitions, f)
+                    transitions = []
+                with open(
+                    os.path.join(demo_buffer_path, f"transitions_{step}.pkl"), "wb"
+                ) as f:
+                    pkl.dump(demo_transitions, f)
+                    demo_transitions = []
 
-            # override the action with the intervention action
-            if "intervene_action" in info:
-                actions = info.pop("intervene_action")
-                intervention_steps += 1
-                if not already_intervened:
-                    intervention_count += 1
-                already_intervened = True
-            else:
-                already_intervened = False
+            timer.tock("total")
 
-            running_return += reward
-            transition = dict(
-                observations=obs,
-                actions=actions,
-                next_observations=next_obs,
-                rewards=reward,
-                masks=1.0 - done,
-                dones=done,
-            )
-            if 'grasp_penalty' in info:
-                transition['grasp_penalty']= info['grasp_penalty']
-            data_store.insert(transition)
-            transitions.append(copy.deepcopy(transition))
-            if already_intervened:
-                intvn_data_store.insert(transition)
-                demo_transitions.append(copy.deepcopy(transition))
-
-            obs = next_obs
-            if done or truncated:
-                info["episode"]["intervention_count"] = intervention_count
-                info["episode"]["intervention_steps"] = intervention_steps
-                stats = {"environment": info}  # send stats to the learner to log
+            if step % config.log_period == 0:
+                stats = {"timer": timer.get_average_times()}
                 client.request("send-stats", stats)
-                pbar.set_description(f"last return: {running_return}")
-                running_return = 0.0
-                intervention_count = 0
-                intervention_steps = 0
-                already_intervened = False
-                client.update()
-                obs, _ = env.reset()
-
-        if step > 0 and config.buffer_period > 0 and step % config.buffer_period == 0:
-            # dump to pickle file
-            buffer_path = os.path.join(FLAGS.checkpoint_path, "buffer")
-            demo_buffer_path = os.path.join(FLAGS.checkpoint_path, "demo_buffer")
-            if not os.path.exists(buffer_path):
-                os.makedirs(buffer_path)
-            if not os.path.exists(demo_buffer_path):
-                os.makedirs(demo_buffer_path)
-            with open(os.path.join(buffer_path, f"transitions_{step}.pkl"), "wb") as f:
-                pkl.dump(transitions, f)
-                transitions = []
-            with open(
-                os.path.join(demo_buffer_path, f"transitions_{step}.pkl"), "wb"
-            ) as f:
-                pkl.dump(demo_transitions, f)
-                demo_transitions = []
-
-        timer.tock("total")
-
-        if step % config.log_period == 0:
-            stats = {"timer": timer.get_average_times()}
-            client.request("send-stats", stats)
+    finally:
+        active_env = None
+        listener.stop()
 
 
 ##############################################################################
