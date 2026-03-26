@@ -22,6 +22,12 @@ FLAGS = flags.FLAGS
 flags.DEFINE_string("exp_name", None, "Name of experiment corresponding to folder.")
 flags.DEFINE_integer("num_epochs", 150, "Number of training epochs.")
 flags.DEFINE_integer("batch_size", 256, "Batch size.")
+flags.DEFINE_integer(
+    "steps_per_epoch",
+    100,
+    "Number of gradient updates per epoch. The previous script only used 1, which is too noisy.",
+)
+flags.DEFINE_float("learning_rate", 1e-4, "Classifier learning rate.")
 flags.DEFINE_string(
     "dataset_dir",
     None,
@@ -114,6 +120,7 @@ def main(_):
     classifier = create_classifier(key, 
                                    sample["observations"], 
                                    config.classifier_keys,
+                                   learning_rate=FLAGS.learning_rate,
                                    )
 
     def data_augmentation_fn(rng, observations):
@@ -145,27 +152,34 @@ def main(_):
         return state.apply_gradients(grads=grads), loss, train_accuracy
 
     for epoch in tqdm(range(FLAGS.num_epochs)):
-        # Sample equal number of positive and negative examples
-        pos_sample = next(pos_iterator)
-        neg_sample = next(neg_iterator)
-        # Merge and create labels
-        batch = concat_batches(
-            pos_sample, neg_sample, axis=0
-        )
-        rng, key = jax.random.split(rng)
-        obs = data_augmentation_fn(key, batch["observations"])
-        batch = batch.copy(
-            add_or_replace={
-                "observations": obs,
-                "labels": batch["labels"][..., None],
-            }
-        )
-            
-        rng, key = jax.random.split(rng)
-        classifier, train_loss, train_accuracy = train_step(classifier, batch, key)
+        epoch_losses = []
+        epoch_accuracies = []
+        for _ in range(FLAGS.steps_per_epoch):
+            # Sample equal number of positive and negative examples
+            pos_sample = next(pos_iterator)
+            neg_sample = next(neg_iterator)
+            # Merge and create labels
+            batch = concat_batches(
+                pos_sample, neg_sample, axis=0
+            )
+            rng, key = jax.random.split(rng)
+            obs = data_augmentation_fn(key, batch["observations"])
+            batch = batch.copy(
+                add_or_replace={
+                    "observations": obs,
+                    "labels": batch["labels"][..., None],
+                }
+            )
+
+            rng, key = jax.random.split(rng)
+            classifier, train_loss, train_accuracy = train_step(classifier, batch, key)
+            epoch_losses.append(float(train_loss))
+            epoch_accuracies.append(float(train_accuracy))
 
         print(
-            f"Epoch: {epoch+1}, Train Loss: {train_loss:.4f}, Train Accuracy: {train_accuracy:.4f}"
+            "Epoch: "
+            f"{epoch+1}, Train Loss: {np.mean(epoch_losses):.4f}, "
+            f"Train Accuracy: {np.mean(epoch_accuracies):.4f}"
         )
 
     checkpoints.save_checkpoint(

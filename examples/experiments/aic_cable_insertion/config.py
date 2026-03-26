@@ -35,7 +35,7 @@ class EnvConfig:
     action_scale_linear: float = 0.01
     action_scale_angular: float = 0.06
     control_frame_id: str = "base_link"
-    max_episode_length: int = 100
+    max_episode_length: int = 6000
     policy_control_period_sec: float = 0.10
     reward_classifier_threshold: float = 0.6
     display_image: bool = True
