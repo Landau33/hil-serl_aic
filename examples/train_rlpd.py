@@ -65,6 +65,45 @@ def print_green(x):
     return print("\033[92m {}\033[00m".format(x))
 
 
+def dump_pickle_atomic(obj, path):
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "wb") as f:
+        pkl.dump(obj, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, path)
+
+
+def load_transitions_from_dir(dir_path, target_buffer, buffer_name):
+    loaded_files = 0
+    skipped_files = 0
+
+    for file in natsorted(glob.glob(os.path.join(dir_path, "*.pkl"))):
+        if os.path.getsize(file) == 0:
+            print(
+                f"Warning: skipping empty {buffer_name} file '{file}'. "
+                "It was likely left behind by an interrupted write."
+            )
+            skipped_files += 1
+            continue
+
+        try:
+            with open(file, "rb") as f:
+                transitions = pkl.load(f)
+        except (EOFError, pkl.UnpicklingError) as exc:
+            print(
+                f"Warning: skipping unreadable {buffer_name} file '{file}': {exc}"
+            )
+            skipped_files += 1
+            continue
+
+        for transition in transitions:
+            target_buffer.insert(transition)
+        loaded_files += 1
+
+    return loaded_files, skipped_files
+
+
 active_env = None
 reset_key = False
 
@@ -188,21 +227,22 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
         for step in pbar:
             timer.tick("total")
 
+            if reset_key:
+                reset_key = False
+                running_return = 0.0
+                intervention_count = 0
+                intervention_steps = 0
+                already_intervened = False
+                client.update()
+                print("Reset requested. Waiting for reset resume key 'r'.")
+                obs, _ = env.reset(options={"wait_for_reset_resume": True})
+                reset_key = False
+                done = False
+                truncated = False
+                waiting_for_manual_reset = False
+                print("Reset finished. Resuming actor rollout.")
+
             if waiting_for_manual_reset:
-                if reset_key:
-                    reset_key = False
-                    running_return = 0.0
-                    intervention_count = 0
-                    intervention_steps = 0
-                    already_intervened = False
-                    client.update()
-                    print("Reset requested. Waiting for reset resume key 'r'.")
-                    obs, _ = env.reset(options={"wait_for_reset_resume": True})
-                    reset_key = False
-                    done = False
-                    truncated = False
-                    waiting_for_manual_reset = False
-                    print("Reset finished. Resuming actor rollout.")
                 timer.tock("total")
                 if step % config.log_period == 0:
                     stats = {"timer": timer.get_average_times()}
@@ -286,14 +326,16 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
                     os.makedirs(buffer_path)
                 if not os.path.exists(demo_buffer_path):
                     os.makedirs(demo_buffer_path)
-                with open(os.path.join(buffer_path, f"transitions_{step}.pkl"), "wb") as f:
-                    pkl.dump(transitions, f)
-                    transitions = []
-                with open(
-                    os.path.join(demo_buffer_path, f"transitions_{step}.pkl"), "wb"
-                ) as f:
-                    pkl.dump(demo_transitions, f)
-                    demo_transitions = []
+                dump_pickle_atomic(
+                    transitions,
+                    os.path.join(buffer_path, f"transitions_{step}.pkl"),
+                )
+                transitions = []
+                dump_pickle_atomic(
+                    demo_transitions,
+                    os.path.join(demo_buffer_path, f"transitions_{step}.pkl"),
+                )
+                demo_transitions = []
 
             timer.tock("total")
 
@@ -535,27 +577,29 @@ def main(_):
         if FLAGS.checkpoint_path is not None and os.path.exists(
             os.path.join(FLAGS.checkpoint_path, "buffer")
         ):
-            for file in glob.glob(os.path.join(FLAGS.checkpoint_path, "buffer/*.pkl")):
-                with open(file, "rb") as f:
-                    transitions = pkl.load(f)
-                    for transition in transitions:
-                        replay_buffer.insert(transition)
+            loaded_files, skipped_files = load_transitions_from_dir(
+                os.path.join(FLAGS.checkpoint_path, "buffer"),
+                replay_buffer,
+                "replay buffer",
+            )
             print_green(
-                f"Loaded previous buffer data. Replay buffer size: {len(replay_buffer)}"
+                "Loaded previous buffer data. "
+                f"Replay buffer size: {len(replay_buffer)} "
+                f"(loaded {loaded_files} files, skipped {skipped_files})."
             )
 
         if FLAGS.checkpoint_path is not None and os.path.exists(
             os.path.join(FLAGS.checkpoint_path, "demo_buffer")
         ):
-            for file in glob.glob(
-                os.path.join(FLAGS.checkpoint_path, "demo_buffer/*.pkl")
-            ):
-                with open(file, "rb") as f:
-                    transitions = pkl.load(f)
-                    for transition in transitions:
-                        demo_buffer.insert(transition)
+            loaded_files, skipped_files = load_transitions_from_dir(
+                os.path.join(FLAGS.checkpoint_path, "demo_buffer"),
+                demo_buffer,
+                "demo buffer",
+            )
             print_green(
-                f"Loaded previous demo buffer data. Demo buffer size: {len(demo_buffer)}"
+                "Loaded previous demo buffer data. "
+                f"Demo buffer size: {len(demo_buffer)} "
+                f"(loaded {loaded_files} files, skipped {skipped_files})."
             )
 
         # learner loop

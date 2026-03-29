@@ -1,0 +1,13 @@
+GPU_UUID="${GPU_UUID:-GPU-45a924c1-5d32-a7cc-ed8d-674d0179dcee}" && \
+export CUDA_VISIBLE_DEVICES="${GPU_UUID}" && \
+export XLA_PYTHON_CLIENT_PREALLOCATE=false && \
+export XLA_PYTHON_CLIENT_MEM_FRACTION=.1 && \
+INFERENCE_CKPT_PATH="$(python3 -c 'from pathlib import Path; import importlib.util; p=Path("/home/young/ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/hil_serl/config.py"); spec=importlib.util.spec_from_file_location("aic_hilserl_config", p); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); print(m.HilSerlModelConfig().checkpoint_path)')" && \
+INFERENCE_CKPT_STEP="$(python3 -c 'from pathlib import Path; import importlib.util; p=Path("/home/young/ws_aic/src/aic/aic_example_policies/aic_example_policies/ros/hil_serl/config.py"); spec=importlib.util.spec_from_file_location("aic_hilserl_config", p); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); print(m.HilSerlModelConfig().checkpoint_step)')" && \
+python ../../train_rlpd.py "$@" \
+    --exp_name=aic_cable_insertion \
+    --checkpoint_path="${INFERENCE_CKPT_PATH}" \
+    --eval_checkpoint_step="${INFERENCE_CKPT_STEP}" \
+    --eval_n_trajs="${EVAL_N_TRAJS:-5}" \
+    --debug \
+    --actor
