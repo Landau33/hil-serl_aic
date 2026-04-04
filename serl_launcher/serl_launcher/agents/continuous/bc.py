@@ -35,7 +35,7 @@ class BCAgent(flax.struct.PyTreeNode):
 
     @partial(jax.jit, static_argnames="pmap_axis")
     def update(self, batch: Batch, pmap_axis: str = None):
-        if self.config["image_keys"][0] not in batch["next_observations"]:
+        if self.config["image_keys"] and self.config["image_keys"][0] not in batch["next_observations"]:
             batch = _unpack(batch)
 
         rng, aug_rng = jax.random.split(self.state.rng)
@@ -147,7 +147,9 @@ class BCAgent(flax.struct.PyTreeNode):
         learning_rate: float = 3e-4,
         augmentation_function: Optional[callable] = None,
     ):
-        if encoder_type == "resnet":
+        if not image_keys:
+            encoders = {}
+        elif encoder_type == "resnet":
             from serl_launcher.vision.resnet_v1 import resnetv1_configs
 
             encoders = {
@@ -222,7 +224,7 @@ class BCAgent(flax.struct.PyTreeNode):
 
         agent = cls(state, config)
 
-        if encoder_type == "resnet-pretrained":  # load pretrained weights for ResNet-10
+        if image_keys and encoder_type == "resnet-pretrained":  # load pretrained weights for ResNet-10
             from serl_launcher.utils.train_utils import load_resnet10_params
             agent = load_resnet10_params(agent, image_keys)
 

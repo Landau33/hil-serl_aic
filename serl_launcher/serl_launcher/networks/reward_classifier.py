@@ -51,23 +51,27 @@ def create_classifier(
     n_way: int = 2,
     learning_rate: float = 1e-4,
 ):
-    pretrained_encoder = resnetv1_configs["resnetv1-10-frozen"](
-        pre_pooling=True,
-        name="pretrained_encoder",
-    )
-    encoders = {
-        image_key: PreTrainedResNetEncoder(
-            pooling_method="spatial_learned_embeddings",
-            num_spatial_blocks=8,
-            bottleneck_dim=256,
-            pretrained_encoder=pretrained_encoder,
-            name=f"encoder_{image_key}",
+    use_state_encoder = len(image_keys) == 0
+    if use_state_encoder:
+        encoders = {}
+    else:
+        pretrained_encoder = resnetv1_configs["resnetv1-10-frozen"](
+            pre_pooling=True,
+            name="pretrained_encoder",
         )
-        for image_key in image_keys
-    }
+        encoders = {
+            image_key: PreTrainedResNetEncoder(
+                pooling_method="spatial_learned_embeddings",
+                num_spatial_blocks=8,
+                bottleneck_dim=256,
+                pretrained_encoder=pretrained_encoder,
+                name=f"encoder_{image_key}",
+            )
+            for image_key in image_keys
+        }
     encoder_def = EncodingWrapper(
         encoder=encoders,
-        use_proprio=False,
+        use_proprio=use_state_encoder,
         enable_stacking=True,
         image_keys=image_keys,
     )
@@ -82,56 +86,54 @@ def create_classifier(
         tx=optax.adam(learning_rate=learning_rate),
     )
 
-    file_name = "resnet10_params.pkl"
-    # Construct the full path to the file
-    file_path = os.path.expanduser("~/.serl/")
-    if not os.path.exists(file_path):
-        os.makedirs(file_path)
-    file_path = os.path.join(file_path, file_name)
-    # Check if the file exists
-    if os.path.exists(file_path):
-        print(f"The ResNet-10 weights already exist at '{file_path}'.")
-    else:
-        url = f"https://github.com/rail-berkeley/serl/releases/download/resnet10/{file_name}"
-        print(f"Downloading file from {url}")
+    if not use_state_encoder:
+        file_name = "resnet10_params.pkl"
+        file_path = os.path.expanduser("~/.serl/")
+        if not os.path.exists(file_path):
+            os.makedirs(file_path)
+        file_path = os.path.join(file_path, file_name)
+        if os.path.exists(file_path):
+            print(f"The ResNet-10 weights already exist at '{file_path}'.")
+        else:
+            url = f"https://github.com/rail-berkeley/serl/releases/download/resnet10/{file_name}"
+            print(f"Downloading file from {url}")
 
-        # Streaming download with progress bar
-        try:
-            response = requests.get(url, stream=True)
-            total_size = int(response.headers.get("content-length", 0))
-            block_size = 1024  # 1 Kibibyte
-            t = tqdm(total=total_size, unit="iB", unit_scale=True)
-            with open(file_path, "wb") as f:
-                for data in response.iter_content(block_size):
-                    t.update(len(data))
-                    f.write(data)
-            t.close()
-            if total_size != 0 and t.n != total_size:
-                raise Exception("Error, something went wrong with the download")
-        except Exception as e:
-            raise RuntimeError(e)
-        print("Download complete!")
+            try:
+                response = requests.get(url, stream=True)
+                total_size = int(response.headers.get("content-length", 0))
+                block_size = 1024
+                t = tqdm(total=total_size, unit="iB", unit_scale=True)
+                with open(file_path, "wb") as f:
+                    for data in response.iter_content(block_size):
+                        t.update(len(data))
+                        f.write(data)
+                t.close()
+                if total_size != 0 and t.n != total_size:
+                    raise Exception("Error, something went wrong with the download")
+            except Exception as e:
+                raise RuntimeError(e)
+            print("Download complete!")
 
-    with open(file_path, "rb") as f:
-        encoder_params = pkl.load(f)
-            
-    param_count = sum(x.size for x in jax.tree_leaves(encoder_params))
-    print(
-        f"Loaded {param_count/1e6}M parameters from ResNet-10 pretrained on ImageNet-1K"
-    )
-    new_params = classifier.params
-    for image_key in image_keys:
-        if "pretrained_encoder" in new_params["encoder_def"][f"encoder_{image_key}"]:
-            for k in new_params["encoder_def"][f"encoder_{image_key}"][
-                "pretrained_encoder"
-            ]:
-                if k in encoder_params:
-                    new_params["encoder_def"][f"encoder_{image_key}"][
-                        "pretrained_encoder"
-                    ][k] = encoder_params[k]
-                    print(f"replaced {k} in encoder_{image_key}")
+        with open(file_path, "rb") as f:
+            encoder_params = pkl.load(f)
 
-    classifier = classifier.replace(params=new_params)
+        param_count = sum(x.size for x in jax.tree_leaves(encoder_params))
+        print(
+            f"Loaded {param_count/1e6}M parameters from ResNet-10 pretrained on ImageNet-1K"
+        )
+        new_params = classifier.params
+        for image_key in image_keys:
+            if "pretrained_encoder" in new_params["encoder_def"][f"encoder_{image_key}"]:
+                for k in new_params["encoder_def"][f"encoder_{image_key}"][
+                    "pretrained_encoder"
+                ]:
+                    if k in encoder_params:
+                        new_params["encoder_def"][f"encoder_{image_key}"][
+                            "pretrained_encoder"
+                        ][k] = encoder_params[k]
+                        print(f"replaced {k} in encoder_{image_key}")
+
+        classifier = classifier.replace(params=new_params)
     return classifier
 
 def load_classifier_func(

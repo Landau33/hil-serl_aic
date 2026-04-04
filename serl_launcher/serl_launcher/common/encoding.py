@@ -50,7 +50,9 @@ class EncodingWrapper(nn.Module):
 
             encoded.append(image)
 
-        encoded = jnp.concatenate(encoded, axis=-1)
+        encoded_features = None
+        if encoded:
+            encoded_features = jnp.concatenate(encoded, axis=-1)
 
         if self.use_proprio:
             # project state to embeddings as well
@@ -59,7 +61,8 @@ class EncodingWrapper(nn.Module):
                 # Combine stacking and channels into a single dimension
                 if len(state.shape) == 2:
                     state = rearrange(state, "T C -> (T C)")
-                    encoded = encoded.reshape(-1)
+                    if encoded_features is not None:
+                        encoded_features = encoded_features.reshape(-1)
                 if len(state.shape) == 3:
                     state = rearrange(state, "B T C -> B (T C)")
             state = nn.Dense(
@@ -67,6 +70,11 @@ class EncodingWrapper(nn.Module):
             )(state)
             state = nn.LayerNorm()(state)
             state = nn.tanh(state)
-            encoded = jnp.concatenate([encoded, state], axis=-1)
+            if encoded_features is None:
+                return state
+            encoded_features = jnp.concatenate([encoded_features, state], axis=-1)
 
-        return encoded
+        if encoded_features is None:
+            raise ValueError("EncodingWrapper requires at least one image key or proprio input.")
+
+        return encoded_features

@@ -67,7 +67,7 @@ class AICCableInsertionEnv(gym.Env):
     
     观测空间包含：
     - 状态信息：TCP 位姿/速度/误差、关节位置/速度/力矩、腕部力/力矩
-    - 图像信息：左/中/右三个相机视角
+    - 图像信息：由配置指定的相机视角
     
     动作空间：6 维连续动作（3 维线速度 + 3 维角速度），范围 [-1, 1]
     """
@@ -90,7 +90,7 @@ class AICCableInsertionEnv(gym.Env):
         self._fake = _FakeTaskState()
         self._last_action = np.zeros((6,), dtype=np.float32)
 
-        # 定义观测空间：包含机器人状态和三目视觉图像
+        # 定义观测空间：包含机器人状态和按配置选择的视觉图像
         self.observation_space = gym.spaces.Dict(
             {
                 "state": gym.spaces.Dict(
@@ -107,18 +107,11 @@ class AICCableInsertionEnv(gym.Env):
                 ),
                 "images": gym.spaces.Dict(
                     {
-                        "left_camera": _image_space(
+                        image_key: _image_space(
                             self.config.image_height,
                             self.config.image_width,
-                        ),
-                        "center_camera": _image_space(
-                            self.config.image_height,
-                            self.config.image_width,
-                        ),
-                        "right_camera": _image_space(
-                            self.config.image_height,
-                            self.config.image_width,
-                        ),
+                        )
+                        for image_key in self.config.image_keys
                     }
                 ),
             }
@@ -263,9 +256,8 @@ class AICCableInsertionEnv(gym.Env):
                 "wrist_torque": flat[43:46].copy(),
             },
             "images": {
-                "left_camera": self._fake_image(0),
-                "center_camera": self._fake_image(1),
-                "right_camera": self._fake_image(2),
+                image_key: self._fake_image(self._camera_index(image_key))
+                for image_key in self.config.image_keys
             },
         }
 
@@ -289,6 +281,18 @@ class AICCableInsertionEnv(gym.Env):
         cursor = int((self._episode_step * 3 + camera_index * 11) % self.config.image_width)
         img[:, max(0, cursor - 2): min(self.config.image_width, cursor + 2), :] = 255
         return img
+
+    @staticmethod
+    def _camera_index(image_key: str) -> int:
+        camera_indices = {
+            "left_camera": 0,
+            "center_camera": 1,
+            "right_camera": 2,
+        }
+        try:
+            return camera_indices[image_key]
+        except KeyError as exc:
+            raise ValueError(f"Unsupported image key: {image_key}") from exc
 
     def _build_live_backend(self):
         """构建真实 ROS2 后端。
@@ -523,9 +527,15 @@ class _AICLiveBackend:
             _KeyboardIntervention or None: 键盘干预实例或 None
         """
         if not self.config.enable_keyboard_intervention:
+            self._node.get_logger().info("Keyboard intervention disabled by config.")
             return None
         try:
-            return _KeyboardIntervention()
+            intervention = _KeyboardIntervention()
+            self._node.get_logger().info(
+                "Keyboard intervention enabled. Keys:"
+                " W/S A/D J/K Q/E U/I O/P"
+            )
+            return intervention
         except Exception as exc:
             self._node.get_logger().warn(
                 f"Keyboard intervention disabled: {exc}"
@@ -603,11 +613,20 @@ class _AICLiveBackend:
                 ),
             },
             "images": {
-                "left_camera": self._extract_image(obs_msg.left_image),
-                "center_camera": self._extract_image(obs_msg.center_image),
-                "right_camera": self._extract_image(obs_msg.right_image),
+                image_key: self._extract_image(self._get_image_msg(obs_msg, image_key))
+                for image_key in self.config.image_keys
             },
         }
+
+    @staticmethod
+    def _get_image_msg(obs_msg, image_key: str):
+        if image_key == "left_camera":
+            return obs_msg.left_image
+        if image_key == "center_camera":
+            return obs_msg.center_image
+        if image_key == "right_camera":
+            return obs_msg.right_image
+        raise ValueError(f"Unsupported image key: {image_key}")
 
     def _extract_image(self, image_msg):
         """从 ROS2 图像消息中提取并处理图像。
@@ -863,7 +882,7 @@ class _KeyboardIntervention:
         try:
             if hasattr(key, "char") and key.char is not None:
                 with self._lock:
-                    self._active_keys.add(key.char)
+                    self._active_keys.add(key.char.lower())
         except AttributeError:
             return
 
@@ -876,6 +895,6 @@ class _KeyboardIntervention:
         try:
             if hasattr(key, "char") and key.char is not None:
                 with self._lock:
-                    self._active_keys.discard(key.char)
+                    self._active_keys.discard(key.char.lower())
         except AttributeError:
             return

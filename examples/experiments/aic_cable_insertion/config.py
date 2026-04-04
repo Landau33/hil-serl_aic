@@ -19,8 +19,8 @@ class EnvConfig:
 
     image_width: int = 128
     image_height: int = 128
-    image_keys: tuple[str, ...] = ("left_camera", "center_camera", "right_camera")
-    classifier_keys: tuple[str, ...] = ("left_camera", "center_camera", "right_camera")
+    image_keys: tuple[str, ...] = ()
+    classifier_keys: tuple[str, ...] = ()
     proprio_keys: tuple[str, ...] = (
         "tcp_pose",
         "tcp_vel",
@@ -72,8 +72,8 @@ class EnvConfig:
 
 
 class TrainConfig(DefaultTrainingConfig):
-    image_keys = ["left_camera", "center_camera", "right_camera"]
-    classifier_keys = ["left_camera", "center_camera", "right_camera"]
+    image_keys = []
+    classifier_keys = []
     proprio_keys = [
         "tcp_pose",
         "tcp_vel",
@@ -148,3 +148,4 @@ class AICBinaryRewardClassifierWrapper(gym.Wrapper):
             info["succeed"] = 1
 
         return obs, reward, done, truncated, info
+

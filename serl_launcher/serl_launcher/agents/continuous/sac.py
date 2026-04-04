@@ -283,7 +283,7 @@ class SACAgent(flax.struct.PyTreeNode):
         batch_size = batch["rewards"].shape[0]
         chex.assert_tree_shape_prefix(batch, (batch_size,))
 
-        if self.config["image_keys"][0] not in batch["next_observations"]:
+        if self.config["image_keys"] and self.config["image_keys"][0] not in batch["next_observations"]:
             batch = _unpack(batch)
         rng, aug_rng = jax.random.split(self.state.rng)
         if "augmentation_function" in self.config.keys() and self.config["augmentation_function"] is not None:
@@ -463,7 +463,9 @@ class SACAgent(flax.struct.PyTreeNode):
         policy_network_kwargs["activate_final"] = True
         critic_network_kwargs["activate_final"] = True
 
-        if encoder_type == "resnet":
+        if not image_keys:
+            encoders = {}
+        elif encoder_type == "resnet":
             from serl_launcher.vision.resnet_v1 import resnetv1_configs
 
             encoders = {
@@ -548,7 +550,7 @@ class SACAgent(flax.struct.PyTreeNode):
             **kwargs,
         )
 
-        if "pretrained" in encoder_type:  # load pretrained weights for ResNet-10
+        if image_keys and "pretrained" in encoder_type:  # load pretrained weights for ResNet-10
             from serl_launcher.utils.train_utils import load_resnet10_params
             agent = load_resnet10_params(agent, image_keys)
 
