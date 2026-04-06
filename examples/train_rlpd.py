@@ -50,6 +50,8 @@ flags.DEFINE_string("checkpoint_path", None, "Path to save checkpoints.")
 flags.DEFINE_integer("eval_checkpoint_step", 0, "Step to evaluate the checkpoint.")
 flags.DEFINE_integer("eval_n_trajs", 0, "Number of trajectories to evaluate.")
 flags.DEFINE_boolean("save_video", False, "Save video.")
+flags.DEFINE_float("manual_success_reward", 1.0, "Reward assigned when pressing 'h'.")
+flags.DEFINE_float("manual_failure_reward", 0.0, "Reward assigned when pressing 'f'.")
 
 flags.DEFINE_boolean(
     "debug", False, "Debug mode."
@@ -106,12 +108,18 @@ def load_transitions_from_dir(dir_path, target_buffer, buffer_name):
 
 active_env = None
 reset_key = False
+success_key = False
+failure_key = False
 
 
 def on_press(key):
-    global active_env, reset_key
+    global active_env, reset_key, success_key, failure_key
     try:
-        if hasattr(key, "char") and key.char == "r":
+        if hasattr(key, "char") and key.char == "h":
+            success_key = True
+        elif hasattr(key, "char") and key.char == "f":
+            failure_key = True
+        elif hasattr(key, "char") and key.char == "r":
             reset_key = True
             if active_env is not None and hasattr(active_env.unwrapped, "notify_reset_resume_keypress"):
                 active_env.unwrapped.notify_reset_resume_keypress()
@@ -126,7 +134,7 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
     """
     This is the actor loop, which runs when "--actor" is set to True.
     """
-    global active_env, reset_key
+    global active_env, reset_key, success_key, failure_key
     try:
         from pynput import keyboard
     except ImportError as exc:
@@ -223,16 +231,27 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
         intervention_count = 0
         intervention_steps = 0
         waiting_for_manual_reset = False
+        pending_episode_info = None
+        zero_action = np.zeros_like(env.action_space.sample())
         pbar = tqdm.tqdm(range(start_step, config.max_steps), dynamic_ncols=True)
         for step in pbar:
             timer.tick("total")
 
             if reset_key:
                 reset_key = False
+                if waiting_for_manual_reset and pending_episode_info is not None:
+                    pending_episode_info["episode"]["intervention_count"] = intervention_count
+                    pending_episode_info["episode"]["intervention_steps"] = intervention_steps
+                    stats = {"environment": pending_episode_info}
+                    client.request("send-stats", stats)
+                    pbar.set_description(f"last return: {running_return}")
+                    pending_episode_info = None
                 running_return = 0.0
                 intervention_count = 0
                 intervention_steps = 0
                 already_intervened = False
+                success_key = False
+                failure_key = False
                 client.update()
                 print("Reset requested. Waiting for reset resume key 'r'.")
                 obs, _ = env.reset(options={"wait_for_reset_resume": True})
@@ -242,16 +261,10 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
                 waiting_for_manual_reset = False
                 print("Reset finished. Resuming actor rollout.")
 
-            if waiting_for_manual_reset:
-                timer.tock("total")
-                if step % config.log_period == 0:
-                    stats = {"timer": timer.get_average_times()}
-                    client.request("send-stats", stats)
-                time.sleep(0.05)
-                continue
-
             with timer.context("sample_actions"):
-                if step < config.random_steps:
+                if waiting_for_manual_reset:
+                    actions = zero_action.copy()
+                elif step < config.random_steps:
                     actions = env.action_space.sample()
                 else:
                     sampling_rng, key = jax.random.split(sampling_rng)
@@ -284,38 +297,54 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
                         print("Manual intervention released. Policy control resumed.")
                     already_intervened = False
 
-                running_return += reward
+                manual_reward = None
+                manual_success = None
+                if success_key:
+                    success_key = False
+                    failure_key = False
+                    manual_reward = FLAGS.manual_success_reward
+                    manual_success = True
+                    print(f"Manual success label received. reward={manual_reward}")
+                elif failure_key:
+                    failure_key = False
+                    success_key = False
+                    manual_reward = FLAGS.manual_failure_reward
+                    manual_success = False
+                    print(f"Manual failure label received. reward={manual_reward}")
+
+                terminal = manual_reward is not None
+                reward_to_store = manual_reward if manual_reward is not None else 0.0
+
                 transition = dict(
                     observations=obs,
                     actions=actions,
                     next_observations=next_obs,
-                    rewards=reward,
-                    masks=1.0 - done,
-                    dones=done,
+                    rewards=reward_to_store,
+                    masks=1.0 - terminal,
+                    dones=terminal,
                 )
                 if 'grasp_penalty' in info:
                     transition['grasp_penalty']= info['grasp_penalty']
-                data_store.insert(transition)
-                transitions.append(copy.deepcopy(transition))
-                if already_intervened:
-                    intvn_data_store.insert(transition)
-                    demo_transitions.append(copy.deepcopy(transition))
+                if not waiting_for_manual_reset:
+                    running_return += reward_to_store
+                    data_store.insert(transition)
+                    transitions.append(copy.deepcopy(transition))
+                    if already_intervened:
+                        intvn_data_store.insert(transition)
+                        demo_transitions.append(copy.deepcopy(transition))
 
                 obs = next_obs
-                if done or truncated:
-                    print(
-                        "Episode end:"
-                        f" done={done}, truncated={truncated},"
-                        f" reward={reward},"
-                        f" succeed={info.get('succeed', 'N/A')},"
-                        f" classifier_prob={info.get('classifier_prob', 'N/A')}"
-                    )
-                    info["episode"]["intervention_count"] = intervention_count
-                    info["episode"]["intervention_steps"] = intervention_steps
-                    stats = {"environment": info}  # send stats to the learner to log
-                    client.request("send-stats", stats)
-                    pbar.set_description(f"last return: {running_return}")
-                    print("Episode finished. Press 'r' to begin reset.")
+                if manual_reward is not None and not waiting_for_manual_reset:
+                    pending_episode_info = copy.deepcopy(info)
+                    if "episode" not in pending_episode_info:
+                        pending_episode_info["episode"] = {}
+                    pending_episode_info["episode"]["manual_label"] = "success" if manual_success else "failure"
+                    pending_episode_info["episode"]["manual_reward"] = manual_reward
+                    pending_episode_info["episode"]["manual_terminal"] = True
+                    pending_episode_info["episode"]["env_done"] = done
+                    pending_episode_info["episode"]["env_truncated"] = truncated
+                    pending_episode_info["episode"]["env_reward"] = reward
+                    print("Manual terminal label recorded. Press 'r' to reset.")
                     waiting_for_manual_reset = True
 
             if step > 0 and config.buffer_period > 0 and step % config.buffer_period == 0:
