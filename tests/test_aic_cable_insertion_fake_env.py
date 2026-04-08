@@ -148,7 +148,7 @@ def test_depth_reward_is_linear_from_entrance_to_target():
     )
 
 
-def test_angle_penalty_is_applied_every_three_degrees_per_axis():
+def test_angle_penalty_is_applied_every_degree_bucket_per_axis():
     penalty, euler_deg = _compute_angle_penalty(
         np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32),
         np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32),
@@ -165,7 +165,7 @@ def test_angle_penalty_is_applied_every_three_degrees_per_axis():
         quat_x_6_deg,
         np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32),
     )
-    assert np.isclose(penalty, -0.0002)
+    assert np.isclose(penalty, -0.0012)
     assert np.isclose(euler_deg[0], 6.0, atol=1e-4)
 
     penalty, euler_deg = _compute_angle_penalty(

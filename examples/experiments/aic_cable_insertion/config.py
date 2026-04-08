@@ -76,8 +76,8 @@ class EnvConfig:
     insertion_xy_tolerance_m: float = 0.005
     xy_distance_penalty_start_m: float = 0.005
     xy_distance_penalty_per_cm: float = 0.2
-    angle_penalty_degrees_per_step: float = 1.0
-    angle_penalty_per_3deg_per_sec: float = 0.003
+    angle_penalty_degrees_per_step: float = 0.5 # 每个轴每多少度记一档
+    angle_penalty_per_bucket_per_step: float = 0.0003 # 每一档每一步扣多少 reward
     angle_expected_relative_euler_deg: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
 

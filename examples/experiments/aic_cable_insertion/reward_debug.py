@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +27,10 @@ from experiments.aic_cable_insertion.wrapper import _euler_xyz_degrees_to_quat_x
 
 
 def main() -> int:
+    try:
+        from pynput import keyboard
+    except ImportError as exc:
+        raise RuntimeError("pynput requires a graphical session. Set DISPLAY or run under X11.") from exc
     import rclpy
     from rclpy.duration import Duration
     from rclpy.node import Node
@@ -41,15 +46,33 @@ def main() -> int:
             self.set_parameters(
                 [Parameter("use_sim_time", Parameter.Type.BOOL, bool(config.use_sim_time))]
             )
-            self._tf_buffer = Buffer()
-            self._tf_listener = TransformListener(self._tf_buffer, self, spin_thread=False)
+            self._tf_buffer = None
+            self._tf_listener = None
             self._max_depth_reward = 0.0
+            self._running_total_reward = 0.0
+            self._started = False
+            self._printed_waiting = False
+            self._toggle_lock = threading.Lock()
             self._expected_relative_quaternion = _euler_xyz_degrees_to_quat_xyzw(
                 config.angle_expected_relative_euler_deg
             )
-            self.create_timer(0.2, self._on_timer)
+            self.create_timer(config.policy_control_period_sec, self._on_timer)
+
+        def _disconnect_tf(self):
+            if self._tf_listener is not None:
+                for attr_name in ("tf_sub", "tf_static_sub"):
+                    sub = getattr(self._tf_listener, attr_name, None)
+                    if sub is not None:
+                        try:
+                            self.destroy_subscription(sub)
+                        except Exception:
+                            pass
+                self._tf_listener = None
+            self._tf_buffer = None
 
         def _lookup(self, source_frame: str):
+            if self._tf_buffer is None:
+                raise RuntimeError("TF lookup requested before recording started.")
             return self._tf_buffer.lookup_transform(
                 config.ground_truth_base_frame,
                 source_frame,
@@ -57,7 +80,27 @@ def main() -> int:
                 timeout=Duration(seconds=0.2),
             )
 
+        def toggle_recording(self):
+            with self._toggle_lock:
+                self._started = not self._started
+                self._printed_waiting = False
+                if self._started:
+                    if self._tf_buffer is None:
+                        self._tf_buffer = Buffer()
+                        self._tf_listener = TransformListener(self._tf_buffer, self, spin_thread=False)
+                    self._max_depth_reward = 0.0
+                    self._running_total_reward = 0.0
+                    print("Reward recording started.", flush=True)
+                else:
+                    self._disconnect_tf()
+                    print("Reward recording stopped.", flush=True)
+
         def _on_timer(self):
+            if not self._started:
+                if not self._printed_waiting:
+                    print("Waiting for 'r' to start reward recording...", flush=True)
+                    self._printed_waiting = True
+                return
             try:
                 source_tf = self._lookup(config.reward_source_frame)
                 target_tf = self._lookup(config.reward_target_frame)
@@ -124,8 +167,7 @@ def main() -> int:
                 target_quaternion_xyzw=target_quaternion,
                 expected_relative_quaternion_xyzw=self._expected_relative_quaternion,
                 degrees_per_step=config.angle_penalty_degrees_per_step,
-                penalty_per_3deg_per_sec=config.angle_penalty_per_3deg_per_sec,
-                control_period_sec=config.policy_control_period_sec,
+                penalty_per_bucket_per_step=config.angle_penalty_per_bucket_per_step,
             )
             xy_distance_penalty, xy_distance = _compute_xy_distance_penalty(
                 source_position=source_position,
@@ -140,15 +182,39 @@ def main() -> int:
             )
 
             self._max_depth_reward = max(self._max_depth_reward, depth_reward)
+            self._running_total_reward += total_reward
 
-            print(f"total_reward={total_reward:+.3f}", flush=True)
+            print(
+                " ".join(
+                    [
+                        f"step_reward={total_reward:+.3f}",
+                        f"total_reward={self._running_total_reward:+.3f}",
+                        (
+                            "angle_deg="
+                            f"[{euler_deg[0]:.2f}, {euler_deg[1]:.2f}, {euler_deg[2]:.2f}]"
+                        ),
+                    ]
+                ),
+                flush=True,
+            )
 
     node = RewardDebugNode()
+    def on_press(key):
+        try:
+            if hasattr(key, "char") and key.char == "r":
+                node.toggle_recording()
+        except AttributeError:
+            pass
+
+    listener = keyboard.Listener(on_press=on_press)
+    listener.start()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
+        listener.stop()
+        node._disconnect_tf()
         node.destroy_node()
         rclpy.shutdown()
     return 0

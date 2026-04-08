@@ -101,9 +101,8 @@ def _compute_angle_penalty(
     source_quaternion_xyzw: np.ndarray,
     target_quaternion_xyzw: np.ndarray,
     expected_relative_quaternion_xyzw: np.ndarray | None = None,
-    degrees_per_step: float = 3.0,
-    penalty_per_3deg_per_sec: float = 0.001,
-    control_period_sec: float = 0.1,
+    degrees_per_step: float = 1.0,
+    penalty_per_bucket_per_step: float = 0.0002,
 ) -> tuple[float, np.ndarray]:
     relative_quaternion = _quat_multiply_xyzw(
         _quat_inverse_xyzw(target_quaternion_xyzw),
@@ -116,7 +115,7 @@ def _compute_angle_penalty(
     )
     euler_deg = np.abs(_quat_xyzw_to_euler_xyz_degrees(relative_quaternion))
     penalty_steps = np.floor(euler_deg / degrees_per_step)
-    penalty = -float(np.sum(penalty_steps) * penalty_per_3deg_per_sec * control_period_sec)
+    penalty = -float(np.sum(penalty_steps) * penalty_per_bucket_per_step)
     return penalty, euler_deg.astype(np.float32)
 
 
@@ -671,8 +670,7 @@ class _AICLiveBackend:
             target_quaternion_xyzw=port_quaternion,
             expected_relative_quaternion_xyzw=expected_relative_quaternion,
             degrees_per_step=self.config.angle_penalty_degrees_per_step,
-            penalty_per_3deg_per_sec=self.config.angle_penalty_per_3deg_per_sec,
-            control_period_sec=self.config.policy_control_period_sec,
+            penalty_per_bucket_per_step=self.config.angle_penalty_per_bucket_per_step,
         )
         depth_delta_reward = _compute_depth_delta_reward(
             current_depth_reward=depth_reward,
@@ -1058,7 +1056,15 @@ class _AICLiveBackend:
 
     def _wait_for_initial_observation(self):
         """等待初始观测到达。"""
-        self.get_observation(timeout_sec=max(1.0, self.config.observation_timeout_sec))
+        initial_timeout_sec = max(10.0, self.config.observation_timeout_sec)
+        try:
+            self.get_observation(timeout_sec=initial_timeout_sec)
+        except TimeoutError as exc:
+            raise TimeoutError(
+                "Timed out waiting for the first AIC observation on "
+                f"topic '{self.config.observation_topic}' after {initial_timeout_sec:.1f}s. "
+                "Check that aic_adapter_node is running and publishing /observations."
+            ) from exc
 
     def notify_reset_resume_keypress(self):
         """记录一次来自外部的 reset 恢复按键。"""
