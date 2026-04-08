@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -7,6 +8,134 @@ from typing import Any
 
 import gymnasium as gym
 import numpy as np
+
+
+def _normalize_quaternion_xyzw(quat: np.ndarray) -> np.ndarray:
+    quat = np.asarray(quat, dtype=np.float64)
+    norm = np.linalg.norm(quat)
+    if norm <= 0.0:
+        return np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
+    return quat / norm
+
+
+def _quat_xyzw_to_euler_xyz_degrees(quat: np.ndarray) -> np.ndarray:
+    x, y, z, w = _normalize_quaternion_xyzw(quat)
+
+    sinr_cosp = 2.0 * (w * x + y * z)
+    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+    roll = np.arctan2(sinr_cosp, cosr_cosp)
+
+    sinp = 2.0 * (w * y - z * x)
+    sinp = np.clip(sinp, -1.0, 1.0)
+    pitch = np.arcsin(sinp)
+
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    yaw = np.arctan2(siny_cosp, cosy_cosp)
+
+    return np.degrees(np.array([roll, pitch, yaw], dtype=np.float64))
+
+
+def _euler_xyz_degrees_to_quat_xyzw(euler_deg: np.ndarray) -> np.ndarray:
+    roll, pitch, yaw = np.radians(np.asarray(euler_deg, dtype=np.float64))
+    cr = np.cos(roll * 0.5)
+    sr = np.sin(roll * 0.5)
+    cp = np.cos(pitch * 0.5)
+    sp = np.sin(pitch * 0.5)
+    cy = np.cos(yaw * 0.5)
+    sy = np.sin(yaw * 0.5)
+    return np.array(
+        [
+            sr * cp * cy - cr * sp * sy,
+            cr * sp * cy + sr * cp * sy,
+            cr * cp * sy - sr * sp * cy,
+            cr * cp * cy + sr * sp * sy,
+        ],
+        dtype=np.float64,
+    )
+
+
+def _quat_multiply_xyzw(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
+    x1, y1, z1, w1 = _normalize_quaternion_xyzw(q1)
+    x2, y2, z2, w2 = _normalize_quaternion_xyzw(q2)
+    return np.array(
+        [
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+        ],
+        dtype=np.float64,
+    )
+
+
+def _quat_inverse_xyzw(quat: np.ndarray) -> np.ndarray:
+    x, y, z, w = _normalize_quaternion_xyzw(quat)
+    return np.array([-x, -y, -z, w], dtype=np.float64)
+
+
+def _compute_depth_reward(
+    plug_position: np.ndarray,
+    port_position: np.ndarray,
+    port_entrance_position: np.ndarray,
+    xy_tolerance_m: float = 0.005,
+) -> float:
+    plug_position = np.asarray(plug_position, dtype=np.float64)
+    port_position = np.asarray(port_position, dtype=np.float64)
+    port_entrance_position = np.asarray(port_entrance_position, dtype=np.float64)
+
+    xy_error = np.linalg.norm(plug_position[:2] - port_position[:2], ord=np.inf)
+    if xy_error > xy_tolerance_m:
+        return 0.0
+
+    total_depth = port_entrance_position[2] - port_position[2]
+    if total_depth <= 0.0:
+        return 0.0
+
+    insertion_progress = (port_entrance_position[2] - plug_position[2]) / total_depth
+    insertion_progress = float(np.clip(insertion_progress, 0.0, 1.0))
+    return float(insertion_progress)
+
+
+def _compute_angle_penalty(
+    source_quaternion_xyzw: np.ndarray,
+    target_quaternion_xyzw: np.ndarray,
+    expected_relative_quaternion_xyzw: np.ndarray | None = None,
+    degrees_per_step: float = 3.0,
+    penalty_per_3deg_per_sec: float = 0.001,
+    control_period_sec: float = 0.1,
+) -> tuple[float, np.ndarray]:
+    relative_quaternion = _quat_multiply_xyzw(
+        _quat_inverse_xyzw(target_quaternion_xyzw),
+        source_quaternion_xyzw,
+    )
+    if expected_relative_quaternion_xyzw is not None:
+        relative_quaternion = _quat_multiply_xyzw(
+            _quat_inverse_xyzw(expected_relative_quaternion_xyzw),
+            relative_quaternion,
+    )
+    euler_deg = np.abs(_quat_xyzw_to_euler_xyz_degrees(relative_quaternion))
+    penalty_steps = np.floor(euler_deg / degrees_per_step)
+    penalty = -float(np.sum(penalty_steps) * penalty_per_3deg_per_sec * control_period_sec)
+    return penalty, euler_deg.astype(np.float32)
+
+
+def _compute_depth_delta_reward(current_depth_reward: float, max_depth_reward: float) -> float:
+    return float(max(0.0, current_depth_reward - max_depth_reward))
+
+
+def _compute_xy_distance_penalty(
+    source_position: np.ndarray,
+    target_position: np.ndarray,
+    start_distance_m: float,
+    penalty_per_cm: float,
+) -> tuple[float, float]:
+    source_position = np.asarray(source_position, dtype=np.float64)
+    target_position = np.asarray(target_position, dtype=np.float64)
+    xy_distance = float(np.linalg.norm(source_position[:2] - target_position[:2]))
+    excess_distance = max(0.0, xy_distance - start_distance_m)
+    penalty = -(excess_distance / 0.01) * penalty_per_cm
+    return float(penalty), xy_distance
 
 
 def _image_space(height: int, width: int) -> gym.spaces.Box:
@@ -170,11 +299,11 @@ class AICCableInsertionEnv(gym.Env):
 
         if self.fake_env:
             obs, info = self._step_fake(action)
+            reward = 0.0
+            done = False
         else:
-            obs, info = self._step_live(action)
+            obs, reward, done, info = self._step_live(action)
 
-        reward = 0.0  # 稀疏奖励，由上层处理
-        done = False
         truncated = self._episode_step >= self.config.max_episode_length
         return obs, reward, done, truncated, info
 
@@ -223,7 +352,11 @@ class AICCableInsertionEnv(gym.Env):
         """
         info = self._live.apply_action(action)
         obs = self._live.get_observation(timeout_sec=self.config.observation_timeout_sec)
-        return obs, info
+        reward_components = self._live.compute_reward_components()
+        info.update(reward_components)
+        reward = float(reward_components["reward"])
+        done = bool(reward_components["succeed"])
+        return obs, reward, done, info
 
     def _sample_fake_initial_state(self) -> _FakeTaskState:
         """采样仿真的初始状态。
@@ -331,6 +464,7 @@ class _AICLiveBackend:
         from rclpy.node import Node
         from rclpy.parameter import Parameter
         from std_srvs.srv import Trigger
+        from tf2_ros import Buffer, TransformException, TransformListener
 
         # 保存 ROS2 相关类型引用
         self._cv2 = cv2
@@ -352,12 +486,40 @@ class _AICLiveBackend:
         self._Vector3 = Vector3
         self._Wrench = Wrench
         self._Trigger = Trigger
+        self._TransformException = TransformException
         self._initialized_rclpy = False
+
+        os.environ.setdefault("RCUTILS_LOGGING_MIN_SEVERITY", "ERROR")
 
         # 初始化 rclpy（如果尚未初始化）
         if not rclpy.ok():
             rclpy.init(args=None)
             self._initialized_rclpy = True
+
+        try:
+            from rclpy.logging import LoggingSeverity, get_logger, set_logger_level
+
+            for logger_name in (
+                "",
+                "rcl",
+                "tf2",
+                "tf2_buffer",
+                "tf2_ros",
+                "tf2_ros_buffer",
+                "tf2_ros_transform_listener",
+            ):
+                try:
+                    set_logger_level(logger_name, LoggingSeverity.ERROR)
+                except Exception:
+                    pass
+
+            for logger_name in ("", "rcl", "tf2", "tf2_ros"):
+                try:
+                    get_logger(logger_name).set_level(LoggingSeverity.ERROR)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
         # 创建 ROS2 节点
         self._node = Node(
@@ -371,6 +533,9 @@ class _AICLiveBackend:
         self._executor.add_node(self._node)
         self._spin_thread = threading.Thread(target=self._executor.spin, daemon=True)
         self._spin_thread.start()
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(self._tf_buffer, self._node, spin_thread=False)
+        self._max_depth_reward = 0.0
 
         # 观测缓存相关锁和事件
         self._obs_lock = threading.Lock()
@@ -417,6 +582,140 @@ class _AICLiveBackend:
         self._ensure_cartesian_mode()
         self._wait_for_initial_observation()
 
+    def compute_reward_components(self) -> dict[str, Any]:
+        try:
+            plug_tf = self._tf_buffer.lookup_transform(
+                self.config.ground_truth_base_frame,
+                self._plug_frame_name(),
+                self._rclpy.time.Time(),
+            )
+            port_tf = self._tf_buffer.lookup_transform(
+                self.config.ground_truth_base_frame,
+                self._port_frame_name(),
+                self._rclpy.time.Time(),
+            )
+            port_entrance_tf = self._tf_buffer.lookup_transform(
+                self.config.ground_truth_base_frame,
+                self._port_entrance_frame_name(),
+                self._rclpy.time.Time(),
+            )
+        except self._TransformException as exc:
+            self._node.get_logger().warn(
+                f"Ground-truth TF unavailable for reward computation: {exc}"
+            )
+            return {
+                "reward": 0.0,
+                "depth_reward": 0.0,
+                "depth_delta_reward": 0.0,
+                "angle_penalty": 0.0,
+                "xy_distance_penalty": 0.0,
+                "xy_distance": 0.0,
+                "succeed": 0,
+                "plug_euler_deg": np.zeros((3,), dtype=np.float32),
+                "gt_available": False,
+            }
+
+        plug_position = np.asarray(
+            [
+                plug_tf.transform.translation.x,
+                plug_tf.transform.translation.y,
+                plug_tf.transform.translation.z,
+            ],
+            dtype=np.float32,
+        )
+        port_position = np.asarray(
+            [
+                port_tf.transform.translation.x,
+                port_tf.transform.translation.y,
+                port_tf.transform.translation.z,
+            ],
+            dtype=np.float32,
+        )
+        port_quaternion = np.asarray(
+            [
+                port_tf.transform.rotation.x,
+                port_tf.transform.rotation.y,
+                port_tf.transform.rotation.z,
+                port_tf.transform.rotation.w,
+            ],
+            dtype=np.float32,
+        )
+        port_entrance_position = np.asarray(
+            [
+                port_entrance_tf.transform.translation.x,
+                port_entrance_tf.transform.translation.y,
+                port_entrance_tf.transform.translation.z,
+            ],
+            dtype=np.float32,
+        )
+
+        depth_reward = _compute_depth_reward(
+            plug_position=plug_position,
+            port_position=port_position,
+            port_entrance_position=port_entrance_position,
+            xy_tolerance_m=self.config.insertion_xy_tolerance_m,
+        )
+        expected_relative_quaternion = _euler_xyz_degrees_to_quat_xyzw(
+            self.config.angle_expected_relative_euler_deg
+        )
+        angle_penalty, plug_euler_deg = _compute_angle_penalty(
+            source_quaternion_xyzw=np.asarray(
+                [
+                    plug_tf.transform.rotation.x,
+                    plug_tf.transform.rotation.y,
+                    plug_tf.transform.rotation.z,
+                    plug_tf.transform.rotation.w,
+                ],
+                dtype=np.float32,
+            ),
+            target_quaternion_xyzw=port_quaternion,
+            expected_relative_quaternion_xyzw=expected_relative_quaternion,
+            degrees_per_step=self.config.angle_penalty_degrees_per_step,
+            penalty_per_3deg_per_sec=self.config.angle_penalty_per_3deg_per_sec,
+            control_period_sec=self.config.policy_control_period_sec,
+        )
+        depth_delta_reward = _compute_depth_delta_reward(
+            current_depth_reward=depth_reward,
+            max_depth_reward=self._max_depth_reward,
+        )
+        xy_distance_penalty, xy_distance = _compute_xy_distance_penalty(
+            source_position=plug_position,
+            target_position=port_position,
+            start_distance_m=self.config.xy_distance_penalty_start_m,
+            penalty_per_cm=self.config.xy_distance_penalty_per_cm,
+        )
+        reward = depth_delta_reward + angle_penalty + xy_distance_penalty
+        self._max_depth_reward = max(self._max_depth_reward, depth_reward)
+        succeed = int(
+            depth_reward >= 1.0 and np.all(np.abs(plug_euler_deg) < self.config.angle_penalty_degrees_per_step)
+        )
+
+        return {
+            "reward": float(reward),
+            "depth_reward": float(depth_reward),
+            "depth_delta_reward": float(depth_delta_reward),
+            "angle_penalty": float(angle_penalty),
+            "xy_distance_penalty": float(xy_distance_penalty),
+            "xy_distance": float(xy_distance),
+            "succeed": succeed,
+            "plug_euler_deg": plug_euler_deg,
+            "plug_position": plug_position,
+            "target_port_position": port_position,
+            "target_port_entrance_position": port_entrance_position,
+            "angle_source_frame": self._plug_frame_name(),
+            "angle_target_frame": self._port_frame_name(),
+            "gt_available": True,
+        }
+
+    def _plug_frame_name(self) -> str:
+        return self.config.reward_source_frame
+
+    def _port_frame_name(self) -> str:
+        return self.config.reward_target_frame
+
+    def _port_entrance_frame_name(self) -> str:
+        return self.config.reward_target_entrance_frame
+
     def reset_task(self, wait_for_reset_resume: bool = False):
         """重置任务到初始状态。
         
@@ -429,6 +728,7 @@ class _AICLiveBackend:
         """
         self._publish_zero_twist()
         time.sleep(0.2)
+        self._max_depth_reward = 0.0
 
         if self.config.enable_tare_on_reset:
             self._maybe_tare_force_torque_sensor()
@@ -768,8 +1068,9 @@ class _AICLiveBackend:
 
     def _wait_for_reset_resume_key(self):
         """等待再次按下 reset 键，结束 reset。"""
-        self._node.get_logger().info(
-            f"Waiting for reset resume key '{self.config.reset_resume_key}'"
+        print(
+            f"Waiting for reset resume key '{self.config.reset_resume_key}'",
+            flush=True,
         )
         with self._reset_resume_condition:
             start_count = self._reset_resume_count

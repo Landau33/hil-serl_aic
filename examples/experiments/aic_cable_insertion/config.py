@@ -1,11 +1,6 @@
 import os
 from dataclasses import dataclass
 
-import gymnasium as gym
-import jax
-import jax.numpy as jnp
-
-from serl_launcher.networks.reward_classifier import load_classifier_func
 from serl_launcher.wrappers.chunking import ChunkingWrapper
 from serl_launcher.wrappers.serl_obs_wrappers import SERLObsWrapper
 
@@ -37,7 +32,6 @@ class EnvConfig:
     control_frame_id: str = "base_link"
     max_episode_length: int = 6000
     policy_control_period_sec: float = 0.10
-    reward_classifier_threshold: float = 0.6
     display_image: bool = True
     observation_timeout_sec: float = 1.0
     post_reset_settle_sec: float = 1.0
@@ -70,6 +64,22 @@ class EnvConfig:
     intervention_angular_velocity: float = 0.06
     reset_resume_key: str = "r"
 
+    ground_truth_base_frame: str = "base_link"
+    task_board_frame: str = "task_board"
+    cable_name: str = "cable_0"
+    plug_name: str = "sfp_module"
+    target_module_name: str = "nic_card_mount_0"
+    port_name: str = "sfp_port_1"
+    reward_source_frame: str = "cable_0/sfp_tip_link"
+    reward_target_frame: str = "task_board/nic_card_mount_0/sfp_port_1_link"
+    reward_target_entrance_frame: str = "task_board/nic_card_mount_0/sfp_port_1_link_entrance"
+    insertion_xy_tolerance_m: float = 0.005
+    xy_distance_penalty_start_m: float = 0.005
+    xy_distance_penalty_per_cm: float = 0.2
+    angle_penalty_degrees_per_step: float = 1.0
+    angle_penalty_per_3deg_per_sec: float = 0.003
+    angle_expected_relative_euler_deg: tuple[float, float, float] = (0.0, 0.0, 0.0)
+
 
 class TrainConfig(DefaultTrainingConfig):
     image_keys = []
@@ -99,53 +109,4 @@ class TrainConfig(DefaultTrainingConfig):
         env = SERLObsWrapper(env, proprio_keys=self.proprio_keys)
         env = ChunkingWrapper(env, obs_horizon=1, act_exec_horizon=None)
 
-        if classifier:
-            classifier_fn = load_classifier_func(
-                key=jax.random.PRNGKey(0),
-                sample=env.observation_space.sample(),
-                image_keys=self.classifier_keys,
-                checkpoint_path=os.path.abspath("classifier_ckpt/"),
-            )
-
-            env = AICBinaryRewardClassifierWrapper(
-                env,
-                classifier_fn=classifier_fn,
-                confidence_threshold=EnvConfig.reward_classifier_threshold,
-            )
-
         return env
-
-
-class AICBinaryRewardClassifierWrapper(gym.Wrapper):
-    """Binary reward wrapper for AIC cable insertion."""
-
-    def __init__(
-        self,
-        env: gym.Env,
-        classifier_fn: callable,
-        confidence_threshold: float,
-    ):
-        super().__init__(env)
-        self._classifier_fn = classifier_fn
-        self._confidence_threshold = confidence_threshold
-
-    def reset(self, **kwargs):
-        obs, info = self.env.reset(**kwargs)
-        info["succeed"] = 0
-        return obs, info
-
-    def step(self, action):
-        obs, reward, done, truncated, info = self.env.step(action)
-        logits = self._classifier_fn(obs)
-        prob = float(jax.nn.sigmoid(jnp.asarray(logits)).reshape(-1)[0])
-
-        info["classifier_prob"] = prob
-        info["succeed"] = 0
-
-        if prob >= self._confidence_threshold:
-            reward = 1
-            done = True
-            info["succeed"] = 1
-
-        return obs, reward, done, truncated, info
-

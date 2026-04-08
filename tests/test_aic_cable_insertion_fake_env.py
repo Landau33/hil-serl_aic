@@ -14,6 +14,10 @@ if str(EXAMPLES_ROOT) not in sys.path:
     sys.path.insert(0, str(EXAMPLES_ROOT))
 
 from experiments.aic_cable_insertion.wrapper import AICCableInsertionEnv
+from experiments.aic_cable_insertion.wrapper import _compute_angle_penalty
+from experiments.aic_cable_insertion.wrapper import _compute_depth_delta_reward
+from experiments.aic_cable_insertion.wrapper import _compute_depth_reward
+from experiments.aic_cable_insertion.wrapper import _compute_xy_distance_penalty
 
 
 @dataclass(frozen=True)
@@ -104,3 +108,98 @@ def test_fake_env_step_updates_state_and_truncates():
         assert env.observation_space.contains(obs)
     finally:
         env.close()
+
+
+def test_depth_reward_is_linear_from_entrance_to_target():
+    port = np.array([0.0, 0.0, 0.00], dtype=np.float32)
+    entrance = np.array([0.0, 0.0, 0.02], dtype=np.float32)
+
+    assert np.isclose(
+        _compute_depth_reward(
+        plug_position=np.array([0.0, 0.0, 0.02], dtype=np.float32),
+        port_position=port,
+        port_entrance_position=entrance,
+        ),
+        0.0,
+    )
+    assert np.isclose(
+        _compute_depth_reward(
+        plug_position=np.array([0.0, 0.0, 0.015], dtype=np.float32),
+        port_position=port,
+        port_entrance_position=entrance,
+        ),
+        0.25,
+    )
+    assert np.isclose(
+        _compute_depth_reward(
+        plug_position=np.array([0.0, 0.0, 0.009], dtype=np.float32),
+        port_position=port,
+        port_entrance_position=entrance,
+        ),
+        0.55,
+    )
+    assert np.isclose(
+        _compute_depth_reward(
+        plug_position=np.array([0.0, 0.0, 0.0], dtype=np.float32),
+        port_position=port,
+        port_entrance_position=entrance,
+        ),
+        1.0,
+    )
+
+
+def test_angle_penalty_is_applied_every_three_degrees_per_axis():
+    penalty, euler_deg = _compute_angle_penalty(
+        np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32),
+        np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32),
+    )
+    assert penalty == 0.0
+    assert np.allclose(euler_deg, np.zeros((3,), dtype=np.float32))
+
+    half_angle_rad = np.deg2rad(6.0 / 2.0)
+    quat_x_6_deg = np.array(
+        [np.sin(half_angle_rad), 0.0, 0.0, np.cos(half_angle_rad)],
+        dtype=np.float32,
+    )
+    penalty, euler_deg = _compute_angle_penalty(
+        quat_x_6_deg,
+        np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32),
+    )
+    assert np.isclose(penalty, -0.0002)
+    assert np.isclose(euler_deg[0], 6.0, atol=1e-4)
+
+    penalty, euler_deg = _compute_angle_penalty(
+        quat_x_6_deg,
+        np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32),
+        expected_relative_quaternion_xyzw=quat_x_6_deg,
+    )
+    assert penalty == 0.0
+    assert np.allclose(euler_deg, np.zeros((3,), dtype=np.float32), atol=1e-4)
+
+
+def test_depth_delta_reward_only_rewards_new_max_depth():
+    assert np.isclose(_compute_depth_delta_reward(0.5, 0.2), 0.3)
+    assert np.isclose(_compute_depth_delta_reward(0.5, 0.5), 0.0)
+    assert np.isclose(_compute_depth_delta_reward(0.2, 0.5), 0.0)
+    assert np.isclose(_compute_depth_delta_reward(0.45, 0.5), 0.0)
+    assert np.isclose(_compute_depth_delta_reward(0.7, 0.5), 0.2)
+
+
+def test_xy_distance_penalty_only_applies_outside_threshold():
+    penalty, distance = _compute_xy_distance_penalty(
+        source_position=np.array([0.0, 0.0, 0.0], dtype=np.float32),
+        target_position=np.array([0.003, 0.004, 0.0], dtype=np.float32),
+        start_distance_m=0.005,
+        penalty_per_cm=0.2,
+    )
+    assert np.isclose(distance, 0.005, atol=1e-6)
+    assert np.isclose(penalty, 0.0)
+
+    penalty, distance = _compute_xy_distance_penalty(
+        source_position=np.array([0.0, 0.0, 0.0], dtype=np.float32),
+        target_position=np.array([0.0, 0.015, 0.0], dtype=np.float32),
+        start_distance_m=0.005,
+        penalty_per_cm=0.2,
+    )
+    assert np.isclose(distance, 0.015, atol=1e-6)
+    assert np.isclose(penalty, -0.2)

@@ -52,6 +52,11 @@ flags.DEFINE_integer("eval_n_trajs", 0, "Number of trajectories to evaluate.")
 flags.DEFINE_boolean("save_video", False, "Save video.")
 flags.DEFINE_float("manual_success_reward", 1.0, "Reward assigned when pressing 'h'.")
 flags.DEFINE_float("manual_failure_reward", 0.0, "Reward assigned when pressing 'f'.")
+flags.DEFINE_float(
+    "manual_success_bonus",
+    5.0,
+    "Additional terminal bonus added on top of env reward when pressing 'h'.",
+)
 
 flags.DEFINE_boolean(
     "debug", False, "Debug mode."
@@ -157,6 +162,7 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
 
             for episode in range(FLAGS.eval_n_trajs):
                 obs, _ = env.reset(options={"wait_for_reset_resume": True})
+                reset_key = False
                 print("Reset finished. Resuming actor rollout.")
                 done = False
                 start_time = time.time()
@@ -221,6 +227,7 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
         demo_transitions = []
 
         obs, _ = env.reset(options={"wait_for_reset_resume": True})
+        reset_key = False
         print("Reset finished. Resuming actor rollout.")
         done = False
 
@@ -242,6 +249,7 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
                 if waiting_for_manual_reset and pending_episode_info is not None:
                     pending_episode_info["episode"]["intervention_count"] = intervention_count
                     pending_episode_info["episode"]["intervention_steps"] = intervention_steps
+                    print(f"Episode submitted. total_reward={running_return:.3f}")
                     stats = {"environment": pending_episode_info}
                     client.request("send-stats", stats)
                     pbar.set_description(f"last return: {running_return}")
@@ -298,22 +306,26 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
                     already_intervened = False
 
                 manual_reward = None
-                manual_success = None
+                manual_label = None
                 if success_key:
                     success_key = False
                     failure_key = False
-                    manual_reward = FLAGS.manual_success_reward
-                    manual_success = True
-                    print(f"Manual success label received. reward={manual_reward}")
+                    manual_reward = float(reward) + FLAGS.manual_success_bonus
+                    manual_label = "success"
+                    print(
+                        "Manual success label received. "
+                        f"env_reward={reward}, bonus={FLAGS.manual_success_bonus}, "
+                        f"stored_reward={manual_reward}"
+                    )
                 elif failure_key:
                     failure_key = False
                     success_key = False
                     manual_reward = FLAGS.manual_failure_reward
-                    manual_success = False
+                    manual_label = "failure"
                     print(f"Manual failure label received. reward={manual_reward}")
 
-                terminal = manual_reward is not None
-                reward_to_store = manual_reward if manual_reward is not None else 0.0
+                terminal = bool(manual_reward is not None)
+                reward_to_store = float(manual_reward) if manual_reward is not None else float(reward)
 
                 transition = dict(
                     observations=obs,
@@ -334,17 +346,18 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
                         demo_transitions.append(copy.deepcopy(transition))
 
                 obs = next_obs
-                if manual_reward is not None and not waiting_for_manual_reset:
+                if terminal and not waiting_for_manual_reset:
                     pending_episode_info = copy.deepcopy(info)
                     if "episode" not in pending_episode_info:
                         pending_episode_info["episode"] = {}
-                    pending_episode_info["episode"]["manual_label"] = "success" if manual_success else "failure"
-                    pending_episode_info["episode"]["manual_reward"] = manual_reward
-                    pending_episode_info["episode"]["manual_terminal"] = True
+                    pending_episode_info["episode"]["env_terminal"] = bool(done or truncated)
                     pending_episode_info["episode"]["env_done"] = done
                     pending_episode_info["episode"]["env_truncated"] = truncated
+                    pending_episode_info["episode"]["manual_terminal"] = True
                     pending_episode_info["episode"]["env_reward"] = reward
-                    print("Manual terminal label recorded. Press 'r' to reset.")
+                    pending_episode_info["episode"]["manual_label"] = manual_label
+                    pending_episode_info["episode"]["stored_reward"] = reward_to_store
+                    print("Manual episode finished. Press 'r' to reset.")
                     waiting_for_manual_reset = True
 
             if step > 0 and config.buffer_period > 0 and step % config.buffer_period == 0:
