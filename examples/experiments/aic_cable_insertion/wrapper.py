@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -41,6 +42,85 @@ def _vector_space(dim: int) -> gym.spaces.Box:
         high=np.inf,
         shape=(dim,),
         dtype=np.float32,
+    )
+
+
+def _normalize_quaternion_xyzw(quat: np.ndarray) -> np.ndarray:
+    quat = np.asarray(quat, dtype=np.float64)
+    norm = np.linalg.norm(quat)
+    if norm <= 0.0:
+        return np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
+    return quat / norm
+
+
+def _quat_multiply_xyzw(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
+    x1, y1, z1, w1 = _normalize_quaternion_xyzw(q1)
+    x2, y2, z2, w2 = _normalize_quaternion_xyzw(q2)
+    return np.array(
+        [
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+        ],
+        dtype=np.float64,
+    )
+
+
+def _quat_inverse_xyzw(quat: np.ndarray) -> np.ndarray:
+    x, y, z, w = _normalize_quaternion_xyzw(quat)
+    return np.array([-x, -y, -z, w], dtype=np.float64)
+
+
+def _quat_xyzw_to_euler_xyz_degrees(quat: np.ndarray) -> np.ndarray:
+    x, y, z, w = _normalize_quaternion_xyzw(quat)
+    sinr_cosp = 2.0 * (w * x + y * z)
+    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+    roll = np.arctan2(sinr_cosp, cosr_cosp)
+
+    sinp = 2.0 * (w * y - z * x)
+    sinp = np.clip(sinp, -1.0, 1.0)
+    pitch = np.arcsin(sinp)
+
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    yaw = np.arctan2(siny_cosp, cosy_cosp)
+    return np.degrees(np.array([roll, pitch, yaw], dtype=np.float64))
+
+
+def _quaternion_from_transform(transform) -> np.ndarray:
+    return np.array(
+        [
+            transform.transform.rotation.x,
+            transform.transform.rotation.y,
+            transform.transform.rotation.z,
+            transform.transform.rotation.w,
+        ],
+        dtype=np.float64,
+    )
+
+
+def _quat_xyzw_to_rotvec(quat: np.ndarray) -> np.ndarray:
+    quat = _normalize_quaternion_xyzw(quat)
+    if quat[3] < 0.0:
+        quat = -quat
+    vector = quat[:3]
+    vector_norm = np.linalg.norm(vector)
+    if vector_norm < 1e-9:
+        return np.zeros(3, dtype=np.float64)
+    angle = 2.0 * np.arctan2(vector_norm, quat[3])
+    return vector / vector_norm * angle
+
+
+def _rotate_vector_by_quat_xyzw(vector: np.ndarray, quat: np.ndarray) -> np.ndarray:
+    quat = _normalize_quaternion_xyzw(quat)
+    q_vec = quat[:3]
+    q_w = quat[3]
+    vector = np.asarray(vector, dtype=np.float64)
+    return (
+        vector
+        + 2.0 * q_w * np.cross(q_vec, vector)
+        + 2.0 * np.cross(q_vec, np.cross(q_vec, vector))
     )
 
 
@@ -182,6 +262,8 @@ class AICCableInsertionEnv(gym.Env):
 
         reward = 0.0  # 稀疏奖励，由上层处理
         done = False
+        info.setdefault("succeed", 0)
+
         truncated = self._episode_step >= self.config.max_episode_length
         return obs, reward, done, truncated, info
 
@@ -317,6 +399,9 @@ class _AICLiveBackend:
         """
         self.config = config
 
+        if getattr(self.config, "suppress_ros_warnings", True):
+            os.environ["RCUTILS_LOGGING_MIN_SEVERITY"] = "ERROR"
+
         import cv2
         import rclpy
         from aic_control_interfaces.msg import MotionUpdate, TargetMode, TrajectoryGenerationMode
@@ -326,7 +411,10 @@ class _AICLiveBackend:
         from rclpy.executors import MultiThreadedExecutor
         from rclpy.node import Node
         from rclpy.parameter import Parameter
+        from rclpy.duration import Duration
+        from rclpy.time import Time
         from std_srvs.srv import Trigger
+        from tf2_ros import Buffer, TransformException, TransformListener
 
         # 保存 ROS2 相关类型引用
         self._cv2 = cv2
@@ -348,6 +436,10 @@ class _AICLiveBackend:
         self._Vector3 = Vector3
         self._Wrench = Wrench
         self._Trigger = Trigger
+        self._Duration = Duration
+        self._Time = Time
+        self._TransformException = TransformException
+        self._TransformListener = TransformListener
         self._initialized_rclpy = False
 
         # 初始化 rclpy（如果尚未初始化）
@@ -367,6 +459,12 @@ class _AICLiveBackend:
         self._executor.add_node(self._node)
         self._spin_thread = threading.Thread(target=self._executor.spin, daemon=True)
         self._spin_thread.start()
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(
+            self._tf_buffer,
+            self._node,
+            spin_thread=False,
+        )
 
         # 观测缓存相关锁和事件
         self._obs_lock = threading.Lock()
@@ -415,7 +513,7 @@ class _AICLiveBackend:
 
     def reset_task(self, wait_for_reset_resume: bool = False):
         """重置任务到初始状态。
-        
+
         执行步骤：
         1. 停止机器人运动
         2. 可选：力传感器归零
@@ -425,6 +523,9 @@ class _AICLiveBackend:
         """
         self._publish_zero_twist()
         time.sleep(0.2)
+
+        if wait_for_reset_resume:
+            self._pause_subscriptions()
 
         if self.config.enable_tare_on_reset:
             self._maybe_tare_force_torque_sensor()
@@ -437,10 +538,48 @@ class _AICLiveBackend:
 
         if wait_for_reset_resume:
             self._wait_for_reset_resume_key()
+            self._resume_subscriptions()
 
         time.sleep(self.config.post_reset_settle_sec)
         self._publish_zero_twist()
         self.get_observation(timeout_sec=self.config.observation_timeout_sec, require_new=True)
+
+    def _pause_subscriptions(self):
+        """Destroy wrapper subscriptions during reset window to silence their callbacks."""
+        if self._observation_sub is not None:
+            self._node.destroy_subscription(self._observation_sub)
+            self._observation_sub = None
+        if self._tf_listener is not None:
+            tf_sub = getattr(self._tf_listener, "tf_sub", None)
+            tf_static_sub = getattr(self._tf_listener, "tf_static_sub", None)
+            if tf_sub is not None:
+                self._node.destroy_subscription(tf_sub)
+            if tf_static_sub is not None:
+                self._node.destroy_subscription(tf_static_sub)
+            self._tf_listener = None
+            try:
+                self._tf_buffer.clear()
+            except AttributeError:
+                pass
+        with self._obs_lock:
+            self._latest_obs = None
+        self._obs_event.clear()
+
+    def _resume_subscriptions(self):
+        """Recreate wrapper subscriptions after reset window ends."""
+        if self._tf_listener is None:
+            self._tf_listener = self._TransformListener(
+                self._tf_buffer,
+                self._node,
+                spin_thread=False,
+            )
+        if self._observation_sub is None:
+            self._observation_sub = self._node.create_subscription(
+                self._Observation,
+                self.config.observation_topic,
+                self._observation_callback,
+                10,
+            )
 
     def apply_action(self, action: np.ndarray):
         """应用动作命令。
@@ -461,10 +600,67 @@ class _AICLiveBackend:
             if intervene_action is not None:
                 commanded_action = intervene_action
                 info["intervene_action"] = intervene_action.copy()
+                info["intervention_source"] = "keyboard"
+            elif (
+                self.config.enable_auto_align_intervention
+                and self._intervention.auto_align_active
+            ):
+                auto_action = self._compute_auto_align_action()
+                if auto_action is not None:
+                    commanded_action = auto_action
+                    info["intervene_action"] = auto_action.copy()
+                    info["intervention_source"] = "auto_align"
 
         self._publish_action(commanded_action)
         time.sleep(self.config.policy_control_period_sec)
         return info
+
+    def _compute_auto_align_action(self) -> np.ndarray | None:
+        try:
+            source_in_target_tf = self._tf_buffer.lookup_transform(
+                self.config.auto_align_target_frame,
+                self.config.auto_align_source_frame,
+                self._Time(),
+                timeout=self._Duration(seconds=0.05),
+            )
+        except self._TransformException:
+            return None
+
+        relative_quaternion = _quaternion_from_transform(source_in_target_tf)
+        euler_deg = _quat_xyzw_to_euler_xyz_degrees(relative_quaternion)
+        if np.max(np.abs(euler_deg)) <= self.config.auto_align_tolerance_deg:
+            self._intervention.auto_align_active = False
+            self._node.get_logger().info(
+                "Auto align intervention reached "
+                f"[{euler_deg[0]:.2f}, {euler_deg[1]:.2f}, {euler_deg[2]:.2f}] deg"
+            )
+            return np.zeros((6,), dtype=np.float32)
+
+        correction_target = -self.config.auto_align_angular_gain * _quat_xyzw_to_rotvec(
+            relative_quaternion
+        )
+        norm = np.linalg.norm(correction_target)
+        max_angular = float(self.config.auto_align_max_angular_velocity)
+        if norm > max_angular:
+            correction_target *= max_angular / norm
+
+        try:
+            target_in_base_tf = self._tf_buffer.lookup_transform(
+                "base_link",
+                self.config.auto_align_target_frame,
+                self._Time(),
+                timeout=self._Duration(seconds=0.05),
+            )
+        except self._TransformException:
+            return None
+
+        angular_base = _rotate_vector_by_quat_xyzw(
+            correction_target,
+            _quaternion_from_transform(target_in_base_tf),
+        )
+        action = np.zeros((6,), dtype=np.float32)
+        action[3:6] = angular_base / float(self.config.action_scale_angular)
+        return np.clip(action, -1.0, 1.0)
 
     def get_observation(self, timeout_sec: float | None = None, require_new: bool = False):
         """获取机器人观测。
@@ -518,14 +714,14 @@ class _AICLiveBackend:
 
     def _make_intervention(self):
         """创建键盘干预对象。
-        
+
         Returns:
             _KeyboardIntervention or None: 键盘干预实例或 None
         """
         if not self.config.enable_keyboard_intervention:
             return None
         try:
-            return _KeyboardIntervention()
+            return _KeyboardIntervention(self._node.get_logger())
         except Exception as exc:
             self._node.get_logger().warn(
                 f"Keyboard intervention disabled: {exc}"
@@ -795,7 +991,7 @@ class _AICLiveBackend:
 
 class _KeyboardIntervention:
     """最小化的键盘遥操作接口，用于 HIL-SERL 演示数据采集。
-    
+
     支持按键：
     - D/A: X 轴正负方向
     - W/S: Y 轴负正方向
@@ -806,8 +1002,8 @@ class _KeyboardIntervention:
     """
 
     _KEY_MAPPINGS = {
-        "d": np.array([1, 0, 0, 0, 0, 0], dtype=np.float32),  # +X
-        "a": np.array([-1, 0, 0, 0, 0, 0], dtype=np.float32), # -X
+        "d": np.array([-1, 0, 0, 0, 0, 0], dtype=np.float32), # -X
+        "a": np.array([1, 0, 0, 0, 0, 0], dtype=np.float32),  # +X
         "w": np.array([0, -1, 0, 0, 0, 0], dtype=np.float32), # +Y
         "s": np.array([0, 1, 0, 0, 0, 0], dtype=np.float32),  # -Y
         "j": np.array([0, 0, -1, 0, 0, 0], dtype=np.float32), # +Z
@@ -820,10 +1016,12 @@ class _KeyboardIntervention:
         "p": np.array([0, 0, 0, 0, 0, -1], dtype=np.float32), # -Rz
     }
 
-    def __init__(self):
+    def __init__(self, logger=None):
         """初始化键盘监听器。"""
         from pynput import keyboard
 
+        self.auto_align_active = False
+        self._logger = logger
         self._active_keys: set[str] = set()
         self._lock = threading.Lock()
         self._listener = keyboard.Listener(
@@ -834,13 +1032,11 @@ class _KeyboardIntervention:
 
     def get_action(self):
         """获取当前按键组合对应的动作。
-        
+
         Returns:
             np.ndarray or None: 6 维动作向量，无按键时返回 None
         """
         with self._lock:
-            if not self._active_keys:
-                return None
             action = np.zeros((6,), dtype=np.float32)
             for key in self._active_keys:
                 if key in self._KEY_MAPPINGS:
@@ -856,26 +1052,33 @@ class _KeyboardIntervention:
 
     def _on_key_press(self, key):
         """按键按下回调。
-        
+
         Args:
             key: 按键对象
         """
         try:
             if hasattr(key, "char") and key.char is not None:
+                char = key.char.lower()
                 with self._lock:
-                    self._active_keys.add(key.char)
+                    if char == "z":
+                        self.auto_align_active = not self.auto_align_active
+                        if self._logger is not None:
+                            state = "enabled" if self.auto_align_active else "disabled"
+                            self._logger.info(f"Auto align intervention: {state}")
+                        return
+                    self._active_keys.add(char)
         except AttributeError:
             return
 
     def _on_key_release(self, key):
         """按键释放回调。
-        
+
         Args:
             key: 按键对象
         """
         try:
             if hasattr(key, "char") and key.char is not None:
                 with self._lock:
-                    self._active_keys.discard(key.char)
+                    self._active_keys.discard(key.char.lower())
         except AttributeError:
             return

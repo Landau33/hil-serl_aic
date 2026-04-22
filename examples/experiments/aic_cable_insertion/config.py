@@ -35,7 +35,7 @@ class EnvConfig:
     action_scale_linear: float = 0.01
     action_scale_angular: float = 0.06
     control_frame_id: str = "base_link"
-    max_episode_length: int = 6000
+    max_episode_length: int = 200
     policy_control_period_sec: float = 0.10
     reward_classifier_threshold: float = 0.6
     display_image: bool = True
@@ -43,7 +43,8 @@ class EnvConfig:
     post_reset_settle_sec: float = 1.0
 
     use_sim_time: bool = True
-    observation_topic: str = "observations"
+    suppress_ros_warnings: bool = True
+    observation_topic: str = "observations_roi"
     pose_command_topic: str = "/aic_controller/pose_commands"
     change_target_mode_service: str = "/aic_controller/change_target_mode"
     tare_force_torque_service: str = "/aic_controller/tare_force_torque_sensor"
@@ -68,10 +69,18 @@ class EnvConfig:
     enable_keyboard_intervention: bool = True
     intervention_linear_velocity: float = 0.01
     intervention_angular_velocity: float = 0.06
+    enable_auto_align_intervention: bool = True
+    auto_align_source_frame: str = "cable_1/sc_tip_link"
+    auto_align_target_frame: str = "task_board/sc_port_1/sc_port_base_link"
+    auto_align_angular_gain: float = 1.2
+    auto_align_max_angular_velocity: float = 0.06
+    auto_align_tolerance_deg: float = 0.5
     reset_resume_key: str = "r"
 
 
 class TrainConfig(DefaultTrainingConfig):
+    batch_size = int(os.environ.get("AIC_BATCH_SIZE", "64"))
+    cta_ratio = int(os.environ.get("AIC_CTA_RATIO", "1"))
     image_keys = ["left_camera", "center_camera", "right_camera"]
     classifier_keys = ["left_camera", "center_camera", "right_camera"]
     proprio_keys = [

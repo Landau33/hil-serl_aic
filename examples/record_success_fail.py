@@ -15,6 +15,11 @@ from experiments.mappings import CONFIG_MAPPING
 FLAGS = flags.FLAGS
 flags.DEFINE_string("exp_name", None, "Name of experiment corresponding to folder.")
 flags.DEFINE_integer("successes_needed", 200, "Number of successful transistions to collect.")
+flags.DEFINE_integer(
+    "success_window",
+    10,
+    "Number of future transitions to label as success after pressing the success key.",
+)
 
 
 success_key = False
@@ -57,6 +62,8 @@ def main(_):
         successes = []
         failures = []
         success_needed = FLAGS.successes_needed
+        success_window_remaining = 0
+        auto_reset_after_success = False
         pbar = tqdm(total=success_needed)
         
         while len(successes) < success_needed:
@@ -77,14 +84,25 @@ def main(_):
             )
             obs = next_obs
             if success_key:
+                success_window_remaining = max(success_window_remaining, FLAGS.success_window)
+                auto_reset_after_success = True
+                success_key = False
+
+            if success_window_remaining > 0:
                 successes.append(transition)
                 pbar.update(1)
-                success_key = False
+                success_window_remaining -= 1
             else:
                 failures.append(transition)
 
+            if auto_reset_after_success and success_window_remaining <= 0:
+                auto_reset_after_success = False
+                reset_key = True
+
             if reset_key:
                 reset_key = False
+                success_window_remaining = 0
+                auto_reset_after_success = False
                 obs, _ = env.reset(options={"wait_for_reset_resume": True})
                 reset_key = False
                 print("Reset finished. Resuming recording.")
