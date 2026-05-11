@@ -3,8 +3,13 @@ __pycache__/
 .pytest_cache/
 
 # Training artifacts
-examples/classifier_ckpt/
-examples/demo_data/
-examples/experiments/*/checkpoint*/
-examples/experiments/*/checkpoints*/
-examples/experiments/*/classifier_ckpt/
+**/checkpoint*/
+**/checkpoints*/
+**/*_ckpt/
+**/ckpt/
+**/buffer/
+**/demo_buffer/
+**/demo_data/
+**/classifier_data/
+*.pkl
+**/*.pkl
