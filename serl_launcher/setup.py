@@ -9,7 +9,6 @@ setup(
     license="MIT",
     install_requires=[
         "zmq",
-        "typing",
         "typing_extensions",
         "opencv-python",
         "lz4",

@@ -9,6 +9,11 @@ from typing import Any
 import gymnasium as gym
 import numpy as np
 
+from experiments.aic_cable_insertion.scripted_intervention import (
+    ScriptedCableInsertionIntervention,
+    ScriptedInterventionConfig,
+)
+
 
 def _image_space(height: int, width: int) -> gym.spaces.Box:
     """创建图像观测空间。
@@ -277,6 +282,19 @@ class AICCableInsertionEnv(gym.Env):
         if self._live is not None:
             self._live.notify_reset_resume_keypress()
 
+    def start_scripted_intervention(self):
+        if self._live is not None:
+            self._live.start_scripted_intervention()
+
+    def stop_scripted_intervention(self):
+        if self._live is not None:
+            self._live.stop_scripted_intervention()
+
+    def scripted_intervention_status(self):
+        if self._live is None:
+            return None
+        return self._live.scripted_intervention_status()
+
     def _step_fake(self, action: np.ndarray):
         """仿真模式下的步进逻辑。
         
@@ -507,9 +525,40 @@ class _AICLiveBackend:
             )
 
         # 初始化键盘干预并切换到笛卡尔模式
+        self._scripted_intervention = None
         self._intervention = self._make_intervention()
+        self._setup_scripted_intervention_status_publisher()
         self._ensure_cartesian_mode()
         self._wait_for_initial_observation()
+
+    def _setup_scripted_intervention_status_publisher(self) -> None:
+        """Publish scripted intervention status as JSON on /scripted_intervention/status."""
+        self._scripted_intervention_status_pub = None
+        self._scripted_intervention_status_timer = None
+        if self._scripted_intervention is None:
+            return
+        from std_msgs.msg import String
+
+        self._String = String
+        self._scripted_intervention_status_pub = self._node.create_publisher(
+            String, "/scripted_intervention/status", 10,
+        )
+        self._scripted_intervention_status_timer = self._node.create_timer(
+            1.0 / 30.0, self._publish_scripted_intervention_status,
+        )
+
+    def _publish_scripted_intervention_status(self) -> None:
+        if (
+            self._scripted_intervention is None
+            or self._scripted_intervention_status_pub is None
+        ):
+            return
+        import json
+
+        status = self._scripted_intervention.status()
+        msg = self._String()
+        msg.data = json.dumps(status)
+        self._scripted_intervention_status_pub.publish(msg)
 
     def reset_task(self, wait_for_reset_resume: bool = False):
         """重置任务到初始状态。
@@ -600,67 +649,10 @@ class _AICLiveBackend:
             if intervene_action is not None:
                 commanded_action = intervene_action
                 info["intervene_action"] = intervene_action.copy()
-                info["intervention_source"] = "keyboard"
-            elif (
-                self.config.enable_auto_align_intervention
-                and self._intervention.auto_align_active
-            ):
-                auto_action = self._compute_auto_align_action()
-                if auto_action is not None:
-                    commanded_action = auto_action
-                    info["intervene_action"] = auto_action.copy()
-                    info["intervention_source"] = "auto_align"
 
         self._publish_action(commanded_action)
         time.sleep(self.config.policy_control_period_sec)
         return info
-
-    def _compute_auto_align_action(self) -> np.ndarray | None:
-        try:
-            source_in_target_tf = self._tf_buffer.lookup_transform(
-                self.config.auto_align_target_frame,
-                self.config.auto_align_source_frame,
-                self._Time(),
-                timeout=self._Duration(seconds=0.05),
-            )
-        except self._TransformException:
-            return None
-
-        relative_quaternion = _quaternion_from_transform(source_in_target_tf)
-        euler_deg = _quat_xyzw_to_euler_xyz_degrees(relative_quaternion)
-        if np.max(np.abs(euler_deg)) <= self.config.auto_align_tolerance_deg:
-            self._intervention.auto_align_active = False
-            self._node.get_logger().info(
-                "Auto align intervention reached "
-                f"[{euler_deg[0]:.2f}, {euler_deg[1]:.2f}, {euler_deg[2]:.2f}] deg"
-            )
-            return np.zeros((6,), dtype=np.float32)
-
-        correction_target = -self.config.auto_align_angular_gain * _quat_xyzw_to_rotvec(
-            relative_quaternion
-        )
-        norm = np.linalg.norm(correction_target)
-        max_angular = float(self.config.auto_align_max_angular_velocity)
-        if norm > max_angular:
-            correction_target *= max_angular / norm
-
-        try:
-            target_in_base_tf = self._tf_buffer.lookup_transform(
-                "base_link",
-                self.config.auto_align_target_frame,
-                self._Time(),
-                timeout=self._Duration(seconds=0.05),
-            )
-        except self._TransformException:
-            return None
-
-        angular_base = _rotate_vector_by_quat_xyzw(
-            correction_target,
-            _quaternion_from_transform(target_in_base_tf),
-        )
-        action = np.zeros((6,), dtype=np.float32)
-        action[3:6] = angular_base / float(self.config.action_scale_angular)
-        return np.clip(action, -1.0, 1.0)
 
     def get_observation(self, timeout_sec: float | None = None, require_new: bool = False):
         """获取机器人观测。
@@ -721,7 +713,133 @@ class _AICLiveBackend:
         if not self.config.enable_keyboard_intervention:
             return None
         try:
-            return _KeyboardIntervention(self._node.get_logger())
+            scripted_intervention = None
+            if getattr(self.config, "enable_scripted_intervention", False):
+                scripted_intervention = ScriptedCableInsertionIntervention(
+                    tf_buffer=self._tf_buffer,
+                    logger=self._node.get_logger(),
+                    time_type=self._Time,
+                    transform_exception=self._TransformException,
+                    config=ScriptedInterventionConfig(
+                        toggle_key=self.config.scripted_intervention_toggle_key,
+                        base_frame=self.config.control_frame_id,
+                        tip_frame=self.config.scripted_intervention_tip_frame,
+                        port_frame=self.config.scripted_intervention_port_frame,
+                        align_linear_gain=self.config.scripted_intervention_align_linear_gain,
+                        align_angular_gain=self.config.scripted_intervention_align_angular_gain,
+                        insert_xy_gain=self.config.scripted_intervention_insert_xy_gain,
+                        insert_z_gain=self.config.scripted_intervention_insert_z_gain,
+                        insert_angular_gain=self.config.scripted_intervention_insert_angular_gain,
+                        insert_linear_velocity_scale=(
+                            self.config.scripted_intervention_insert_linear_velocity_scale
+                        ),
+                        max_linear_velocity=self.config.intervention_linear_velocity,
+                        max_angular_velocity=self.config.intervention_angular_velocity,
+                        min_insert_z_velocity=(
+                            self.config.scripted_intervention_min_insert_z_velocity
+                        ),
+                        min_insert_xy_correction_velocity=(
+                            self.config.scripted_intervention_min_insert_xy_correction_velocity
+                        ),
+                        min_insert_angular_correction_velocity=(
+                            self.config.scripted_intervention_min_insert_angular_correction_velocity
+                        ),
+                        action_scale_linear=self.config.action_scale_linear,
+                        action_scale_angular=self.config.action_scale_angular,
+                        linear_deadband_m=self.config.scripted_intervention_linear_deadband_m,
+                        angular_deadband_rad=self.config.scripted_intervention_angular_deadband_rad,
+                        xy_align_tolerance_m=(
+                            self.config.scripted_intervention_xy_align_tolerance_m
+                        ),
+                        z_insert_tolerance_m=(
+                            self.config.scripted_intervention_z_insert_tolerance_m
+                        ),
+                        orientation_align_tolerance_rad=(
+                            self.config.scripted_intervention_orientation_align_tolerance_rad
+                        ),
+                        safe_axial_clearance_m=(
+                            self.config.scripted_intervention_safe_axial_clearance_m
+                        ),
+                        lift_trigger_axial_clearance_m=(
+                            self.config.scripted_intervention_lift_trigger_axial_clearance_m
+                        ),
+                        lift_lateral_threshold_m=(
+                            self.config.scripted_intervention_lift_lateral_threshold_m
+                        ),
+                        align_stuck_window_steps=(
+                            self.config.scripted_intervention_align_stuck_window_steps
+                        ),
+                        align_stuck_xy_progress_threshold_m=(
+                            self.config.scripted_intervention_align_stuck_xy_progress_threshold_m
+                        ),
+                        align_stuck_xy_min_velocity=(
+                            self.config.scripted_intervention_align_stuck_xy_min_velocity
+                        ),
+                        stuck_window_steps=self.config.scripted_intervention_stuck_window_steps,
+                        stuck_z_progress_threshold_m=(
+                            self.config.scripted_intervention_stuck_z_progress_threshold_m
+                        ),
+                        stuck_recover_progress_threshold_m=(
+                            self.config.scripted_intervention_stuck_recover_progress_threshold_m
+                        ),
+                        aggressive_insert_xy_gain=(
+                            self.config.scripted_intervention_aggressive_insert_xy_gain
+                        ),
+                        aggressive_insert_z_gain=(
+                            self.config.scripted_intervention_aggressive_insert_z_gain
+                        ),
+                        aggressive_insert_angular_gain=(
+                            self.config.scripted_intervention_aggressive_insert_angular_gain
+                        ),
+                        aggressive_max_linear_velocity=(
+                            self.config.scripted_intervention_aggressive_max_linear_velocity
+                        ),
+                        aggressive_xy_velocity_scale=(
+                            self.config.scripted_intervention_aggressive_xy_velocity_scale
+                        ),
+                        aggressive_z_velocity_scale=(
+                            self.config.scripted_intervention_aggressive_z_velocity_scale
+                        ),
+                        aggressive_min_insert_z_velocity=(
+                            self.config.scripted_intervention_aggressive_min_insert_z_velocity
+                        ),
+                        stuck_target_xy_min_velocity=(
+                            self.config.scripted_intervention_stuck_target_xy_min_velocity
+                        ),
+                        stuck_directional_linear_boost=(
+                            self.config.scripted_intervention_stuck_directional_linear_boost
+                        ),
+                        stuck_directional_angular_boost=(
+                            self.config.scripted_intervention_stuck_directional_angular_boost
+                        ),
+                        persistent_angular_stuck_window_steps=(
+                            self.config.scripted_intervention_persistent_angular_stuck_window_steps
+                        ),
+                        persistent_angular_progress_threshold_rad=(
+                            self.config.scripted_intervention_persistent_angular_progress_threshold_rad
+                        ),
+                        persistent_angular_boost=(
+                            self.config.scripted_intervention_persistent_angular_boost
+                        ),
+                        stuck_search_linear_velocity=(
+                            self.config.scripted_intervention_stuck_search_linear_velocity
+                        ),
+                        stuck_search_angular_velocity=(
+                            self.config.scripted_intervention_stuck_search_angular_velocity
+                        ),
+                        stuck_search_period_steps=(
+                            self.config.scripted_intervention_stuck_search_period_steps
+                        ),
+                        stuck_search_ramp_steps=(
+                            self.config.scripted_intervention_stuck_search_ramp_steps
+                        ),
+                    ),
+                )
+            self._scripted_intervention = scripted_intervention
+            return _KeyboardIntervention(
+                logger=self._node.get_logger(),
+                scripted_intervention=scripted_intervention,
+            )
         except Exception as exc:
             self._node.get_logger().warn(
                 f"Keyboard intervention disabled: {exc}"
@@ -943,6 +1061,19 @@ class _AICLiveBackend:
             self._reset_resume_count += 1
             self._reset_resume_condition.notify_all()
 
+    def start_scripted_intervention(self):
+        if self._intervention is not None:
+            self._intervention.start_scripted_intervention()
+
+    def stop_scripted_intervention(self):
+        if self._intervention is not None:
+            self._intervention.stop_scripted_intervention()
+
+    def scripted_intervention_status(self):
+        if self._intervention is None:
+            return None
+        return self._intervention.scripted_intervention_status()
+
     def _wait_for_reset_resume_key(self):
         """等待再次按下 reset 键，结束 reset。"""
         self._node.get_logger().info(
@@ -1016,12 +1147,12 @@ class _KeyboardIntervention:
         "p": np.array([0, 0, 0, 0, 0, -1], dtype=np.float32), # -Rz
     }
 
-    def __init__(self, logger=None):
+    def __init__(self, logger=None, scripted_intervention=None):
         """初始化键盘监听器。"""
         from pynput import keyboard
 
-        self.auto_align_active = False
         self._logger = logger
+        self._scripted_intervention = scripted_intervention
         self._active_keys: set[str] = set()
         self._lock = threading.Lock()
         self._listener = keyboard.Listener(
@@ -1036,6 +1167,11 @@ class _KeyboardIntervention:
         Returns:
             np.ndarray or None: 6 维动作向量，无按键时返回 None
         """
+        if self._scripted_intervention is not None:
+            scripted_action = self._scripted_intervention.get_action()
+            if scripted_action is not None:
+                return scripted_action
+
         with self._lock:
             action = np.zeros((6,), dtype=np.float32)
             for key in self._active_keys:
@@ -1050,6 +1186,19 @@ class _KeyboardIntervention:
         """停止键盘监听器。"""
         self._listener.stop()
 
+    def start_scripted_intervention(self):
+        if self._scripted_intervention is not None:
+            self._scripted_intervention.start()
+
+    def stop_scripted_intervention(self):
+        if self._scripted_intervention is not None:
+            self._scripted_intervention.stop()
+
+    def scripted_intervention_status(self):
+        if self._scripted_intervention is None:
+            return None
+        return self._scripted_intervention.status()
+
     def _on_key_press(self, key):
         """按键按下回调。
 
@@ -1059,14 +1208,15 @@ class _KeyboardIntervention:
         try:
             if hasattr(key, "char") and key.char is not None:
                 char = key.char.lower()
+                if (
+                    self._scripted_intervention is not None
+                    and char == self._scripted_intervention.toggle_key
+                ):
+                    self._scripted_intervention.start()
+                    return
                 with self._lock:
-                    if char == "z":
-                        self.auto_align_active = not self.auto_align_active
-                        if self._logger is not None:
-                            state = "enabled" if self.auto_align_active else "disabled"
-                            self._logger.info(f"Auto align intervention: {state}")
-                        return
-                    self._active_keys.add(char)
+                    if char in self._KEY_MAPPINGS:
+                        self._active_keys.add(char)
         except AttributeError:
             return
 
@@ -1078,7 +1228,14 @@ class _KeyboardIntervention:
         """
         try:
             if hasattr(key, "char") and key.char is not None:
+                char = key.char.lower()
+                if (
+                    self._scripted_intervention is not None
+                    and char == self._scripted_intervention.toggle_key
+                ):
+                    self._scripted_intervention.stop()
+                    return
                 with self._lock:
-                    self._active_keys.discard(key.char.lower())
+                    self._active_keys.discard(char)
         except AttributeError:
             return
