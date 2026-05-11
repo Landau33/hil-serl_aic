@@ -10,9 +10,9 @@ class LagrangeMultiplier(nn.Module):
     init_value: float = 1.0
     constraint_shape: Sequence[int] = ()
     constraint_type: str = "eq"  # One of ("eq", "leq", "geq")
-    parameterization: Optional[
-        str
-    ] = None  # One of ("softplus", "exp"), or None for equality constraints
+    parameterization: Optional[str] = (
+        None  # One of ("softplus", "exp"), or None for equality constraints
+    )
 
     @nn.compact
     def __call__(

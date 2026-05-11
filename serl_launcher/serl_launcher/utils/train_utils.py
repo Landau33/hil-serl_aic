@@ -13,24 +13,31 @@ import wandb
 from flax.core import frozen_dict
 from flax.training import checkpoints
 
-def ask_for_frame(images_dict):    
+
+def ask_for_frame(images_dict):
     # Create a new figure
     fig, axes = plt.subplots(5, 5, figsize=(15, 20))
-    
+
     # Flatten the axes array for easier indexing
     axes = axes.flatten()
     for i, (idx, img) in enumerate(images_dict.items()):
         # Display the image
         axes[i].imshow(img)
-        
+
         # Remove axis ticks
         axes[i].set_xticks([])
         axes[i].set_yticks([])
-        
+
         # Overlay the index number
-        axes[i].text(10, 30, str(idx), color='white', fontsize=12, 
-                     bbox=dict(facecolor='black', alpha=0.7))
-    
+        axes[i].text(
+            10,
+            30,
+            str(idx),
+            color="white",
+            fontsize=12,
+            bbox=dict(facecolor="black", alpha=0.7),
+        )
+
     plt.tight_layout()
     plt.show(block=False)
 
@@ -43,8 +50,9 @@ def ask_for_frame(images_dict):
             continue
 
     plt.close(fig)
-    
+
     return first_success
+
 
 def concat_batches(offline_batch, online_batch, axis=1):
     batch = defaultdict(list)
@@ -70,7 +78,7 @@ def load_recorded_video(
     try:
         import tensorflow as tf
     except ImportError as exc:
-        raise RuntimeError('tensorflow is required to load recorded videos') from exc
+        raise RuntimeError("tensorflow is required to load recorded videos") from exc
 
     with tf.io.gfile.GFile(video_path, "rb") as f:
         video = np.array(imageio.mimread(f, "MP4")).transpose((0, 3, 1, 2))

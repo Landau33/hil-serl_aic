@@ -9,6 +9,7 @@ import numpy as np
 
 # --- Quaternion math (xyzw) ---------------------------------------------------
 
+
 def _normalize_quaternion_xyzw(quat: np.ndarray) -> np.ndarray:
     quat = np.asarray(quat, dtype=np.float64)
     norm = np.linalg.norm(quat)
@@ -70,6 +71,7 @@ def _pose_from_transform(tf_msg: Any) -> tuple[np.ndarray, np.ndarray]:
 
 
 # --- Config -------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class ScriptedInterventionConfig:
@@ -158,6 +160,7 @@ class _InsertGains:
 
 
 # --- Main class ---------------------------------------------------------------
+
 
 class ScriptedCableInsertionIntervention:
     """Three-phase scripted intervention.
@@ -271,10 +274,14 @@ class ScriptedCableInsertionIntervention:
         try:
             now = self._Time()
             port_tf = self._tf_buffer.lookup_transform(
-                self._config.base_frame, self._config.port_frame, now,
+                self._config.base_frame,
+                self._config.port_frame,
+                now,
             )
             tip_tf = self._tf_buffer.lookup_transform(
-                self._config.base_frame, self._config.tip_frame, now,
+                self._config.base_frame,
+                self._config.tip_frame,
+                now,
             )
         except self._TransformException as exc:
             self._maybe_warn(f"Scripted intervention TF lookup failed: {exc}")
@@ -286,13 +293,16 @@ class ScriptedCableInsertionIntervention:
         quat_error = _quat_multiply_xyzw(port_quat, _quat_inverse_xyzw(tip_quat))
         angular_error = _quat_to_rotvec_xyzw(quat_error)
         port_x_axis = _rotate_vector_by_quat_xyzw(
-            np.array([1.0, 0.0, 0.0], dtype=np.float64), port_quat,
+            np.array([1.0, 0.0, 0.0], dtype=np.float64),
+            port_quat,
         )
         port_y_axis = _rotate_vector_by_quat_xyzw(
-            np.array([0.0, 1.0, 0.0], dtype=np.float64), port_quat,
+            np.array([0.0, 1.0, 0.0], dtype=np.float64),
+            port_quat,
         )
         port_z_axis = _rotate_vector_by_quat_xyzw(
-            np.array([0.0, 0.0, 1.0], dtype=np.float64), port_quat,
+            np.array([0.0, 0.0, 1.0], dtype=np.float64),
+            port_quat,
         )
 
         # Decompose position error into axial (along port_z) and lateral (perpendicular).
@@ -384,7 +394,9 @@ class ScriptedCableInsertionIntervention:
             return np.zeros((6,), dtype=np.float32)
         linear_action = linear_velocity / max(cfg.action_scale_linear, 1e-9)
         angular_action = angular_velocity / max(cfg.action_scale_angular, 1e-9)
-        return np.concatenate((linear_action, angular_action), axis=0).astype(np.float32)
+        return np.concatenate((linear_action, angular_action), axis=0).astype(
+            np.float32
+        )
 
     # -- Lift phase -----------------------------------------------------------
 
@@ -404,10 +416,13 @@ class ScriptedCableInsertionIntervention:
         """
         cfg = self._config
         clearance_deficit = cfg.safe_axial_clearance_m - axial_error
-        speed = float(np.clip(
-            cfg.align_linear_gain * clearance_deficit,
-            0.0, cfg.max_linear_velocity,
-        ))
+        speed = float(
+            np.clip(
+                cfg.align_linear_gain * clearance_deficit,
+                0.0,
+                cfg.max_linear_velocity,
+            )
+        )
         linear_velocity = -port_z_axis * speed
         angular_velocity = np.zeros(3, dtype=np.float64)
         # Reset stall counters that don't apply during lift
@@ -434,7 +449,8 @@ class ScriptedCableInsertionIntervention:
         )
         linear_velocity = np.clip(
             lateral_error * cfg.align_linear_gain,
-            -cfg.max_linear_velocity, cfg.max_linear_velocity,
+            -cfg.max_linear_velocity,
+            cfg.max_linear_velocity,
         )
         if self._align_stuck_active:
             self._apply_min_directional_velocity(
@@ -445,13 +461,17 @@ class ScriptedCableInsertionIntervention:
             )
         angular_velocity = np.clip(
             angular_error * cfg.align_angular_gain,
-            -cfg.max_angular_velocity, cfg.max_angular_velocity,
+            -cfg.max_angular_velocity,
+            cfg.max_angular_velocity,
         )
         self._persistent_angular_stuck_steps.fill(0)
         return linear_velocity, angular_velocity
 
     def _update_align_stuck_state(
-        self, *, lateral_error_norm: float, lateral_aligned: bool,
+        self,
+        *,
+        lateral_error_norm: float,
+        lateral_aligned: bool,
     ) -> None:
         cfg = self._config
         if lateral_aligned:
@@ -508,7 +528,8 @@ class ScriptedCableInsertionIntervention:
         # Lateral PD (always active in insert too)
         linear_velocity = np.clip(
             lateral_error * gains.lateral_gain,
-            -gains.lateral_velocity_limit, gains.lateral_velocity_limit,
+            -gains.lateral_velocity_limit,
+            gains.lateral_velocity_limit,
         )
         self._apply_min_directional_velocity(
             velocity=linear_velocity,
@@ -518,19 +539,24 @@ class ScriptedCableInsertionIntervention:
         )
         # Axial descent — gated on alignment
         if aligned:
-            axial_velocity = float(np.clip(
-                axial_error_pd * gains.axial_gain,
-                -gains.axial_velocity_limit, gains.axial_velocity_limit,
-            ))
+            axial_velocity = float(
+                np.clip(
+                    axial_error_pd * gains.axial_gain,
+                    -gains.axial_velocity_limit,
+                    gains.axial_velocity_limit,
+                )
+            )
             if abs(axial_error_pd) >= cfg.z_insert_tolerance_m:
                 axial_velocity = float(np.sign(axial_error_pd)) * max(
-                    abs(axial_velocity), gains.min_insert_axial_velocity,
+                    abs(axial_velocity),
+                    gains.min_insert_axial_velocity,
                 )
             linear_velocity += axial_velocity * port_z_axis
 
         angular_velocity = np.clip(
             angular_error * gains.angular_gain,
-            -0.5 * cfg.max_angular_velocity, 0.5 * cfg.max_angular_velocity,
+            -0.5 * cfg.max_angular_velocity,
+            0.5 * cfg.max_angular_velocity,
         )
         self._apply_min_directional_velocity(
             velocity=angular_velocity,
@@ -631,7 +657,8 @@ class ScriptedCableInsertionIntervention:
         for axis in range(3):
             if (
                 abs_angular_error[axis] >= cfg.angular_deadband_rad
-                and angular_progress[axis] < cfg.persistent_angular_progress_threshold_rad
+                and angular_progress[axis]
+                < cfg.persistent_angular_progress_threshold_rad
             ):
                 self._persistent_angular_stuck_steps[axis] += 1
             else:
@@ -665,11 +692,15 @@ class ScriptedCableInsertionIntervention:
                 gains.linear_velocity_limit,
                 gains.lateral_velocity_limit * cfg.stuck_directional_linear_boost,
             )
-            linear_velocity[axis] = float(np.clip(
-                lateral_error[axis] * gains.lateral_gain
-                * cfg.stuck_directional_linear_boost,
-                -limit, limit,
-            ))
+            linear_velocity[axis] = float(
+                np.clip(
+                    lateral_error[axis]
+                    * gains.lateral_gain
+                    * cfg.stuck_directional_linear_boost,
+                    -limit,
+                    limit,
+                )
+            )
         elif angular_max > 0.0:
             axis = int(np.argmax(np.abs(angular_error)))
             self._boost_angular_axis(
@@ -699,9 +730,13 @@ class ScriptedCableInsertionIntervention:
     ) -> None:
         cfg = self._config
         limit = min(cfg.max_angular_velocity, 0.5 * cfg.max_angular_velocity * boost)
-        angular_velocity[axis] = float(np.clip(
-            angular_error[axis] * base_gain * boost, -limit, limit,
-        ))
+        angular_velocity[axis] = float(
+            np.clip(
+                angular_error[axis] * base_gain * boost,
+                -limit,
+                limit,
+            )
+        )
 
     # -- Common helpers -------------------------------------------------------
 
@@ -774,7 +809,8 @@ class ScriptedCableInsertionIntervention:
             )
             angular_velocity[:] = np.clip(
                 angular_velocity + angular_bias,
-                -cfg.max_angular_velocity, cfg.max_angular_velocity,
+                -cfg.max_angular_velocity,
+                cfg.max_angular_velocity,
             )
 
     @staticmethod
@@ -785,7 +821,9 @@ class ScriptedCableInsertionIntervention:
         min_velocity: float,
         velocity_limit: float,
     ) -> None:
-        min_velocity = min(max(float(min_velocity), 0.0), max(float(velocity_limit), 0.0))
+        min_velocity = min(
+            max(float(min_velocity), 0.0), max(float(velocity_limit), 0.0)
+        )
         if min_velocity <= 0.0:
             return
         error_norm = float(np.linalg.norm(error))

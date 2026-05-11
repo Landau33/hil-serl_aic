@@ -4,6 +4,7 @@ import time
 import numpy as np
 from collections import OrderedDict
 
+
 class MultiVideoCapture:
     def __init__(self, caps):
         self.caps = caps
@@ -20,7 +21,7 @@ class MultiVideoCapture:
                 ret, frame = cap.read()
                 if ret:
                     frames[name] = frame
-            
+
             if frames:
                 if not self.queue.empty():
                     try:

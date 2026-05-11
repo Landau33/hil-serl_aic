@@ -17,11 +17,11 @@ from experiments.aic_cable_insertion.scripted_intervention import (
 
 def _image_space(height: int, width: int) -> gym.spaces.Box:
     """创建图像观测空间。
-    
+
     Args:
         height: 图像高度（像素）
         width: 图像宽度（像素）
-        
+
     Returns:
         gym.spaces.Box: 形状为 (height, width, 3) 的 RGB 图像空间，值域 [0, 255]
     """
@@ -35,10 +35,10 @@ def _image_space(height: int, width: int) -> gym.spaces.Box:
 
 def _vector_space(dim: int) -> gym.spaces.Box:
     """创建向量观测空间。
-    
+
     Args:
         dim: 向量维度
-        
+
     Returns:
         gym.spaces.Box: 形状为 (dim,) 的浮点数向量空间，值域 [-∞, +∞]
     """
@@ -132,28 +132,29 @@ def _rotate_vector_by_quat_xyzw(vector: np.ndarray, quat: np.ndarray) -> np.ndar
 @dataclass
 class _FakeTaskState:
     """仿真任务状态数据类。
-    
+
     用于在没有真实机器人时模拟环境状态。
-    
+
     Attributes:
         step_count: 当前步数计数
         state: 状态向量（46 维）
     """
+
     step_count: int = 0
     state: np.ndarray | None = None
 
 
 class AICCableInsertionEnv(gym.Env):
     """AIC 电缆插入环境，用于 HIL-SERL 训练。
-    
+
     该类实现了 OpenAI Gym 接口，支持两种模式：
     1. 仿真模式 (fake_env=True): 使用简化的物理模型生成虚拟观测
     2. 真实模式 (fake_env=False): 通过 ROS2 与真实机器人或仿真器交互
-    
+
     观测空间包含：
     - 状态信息：TCP 位姿/速度/误差、关节位置/速度/力矩、腕部力/力矩
     - 图像信息：左/中/右三个相机视角
-    
+
     动作空间：6 维连续动作（3 维线速度 + 3 维角速度），范围 [-1, 1]
     """
 
@@ -161,7 +162,7 @@ class AICCableInsertionEnv(gym.Env):
 
     def __init__(self, fake_env: bool, save_video: bool, config: Any):
         """初始化环境。
-        
+
         Args:
             fake_env: 是否使用仿真模式
             save_video: 是否保存视频
@@ -180,14 +181,14 @@ class AICCableInsertionEnv(gym.Env):
             {
                 "state": gym.spaces.Dict(
                     {
-                        "tcp_pose": _vector_space(7),      # TCP 位姿 (x,y,z,qx,qy,qz,qw)
-                        "tcp_vel": _vector_space(6),       # TCP 速度 (线速度 + 角速度)
-                        "tcp_error": _vector_space(6),     # TCP 跟踪误差
-                        "joint_positions": _vector_space(7),   # 7 个关节位置
+                        "tcp_pose": _vector_space(7),  # TCP 位姿 (x,y,z,qx,qy,qz,qw)
+                        "tcp_vel": _vector_space(6),  # TCP 速度 (线速度 + 角速度)
+                        "tcp_error": _vector_space(6),  # TCP 跟踪误差
+                        "joint_positions": _vector_space(7),  # 7 个关节位置
                         "joint_velocities": _vector_space(7),  # 7 个关节速度
-                        "joint_efforts": _vector_space(7),     # 7 个关节力矩
-                        "wrist_force": _vector_space(3),       # 腕部力传感器 (Fx,Fy,Fz)
-                        "wrist_torque": _vector_space(3),      # 腕部力传感器 (Tx,Ty,Tz)
+                        "joint_efforts": _vector_space(7),  # 7 个关节力矩
+                        "wrist_force": _vector_space(3),  # 腕部力传感器 (Fx,Fy,Fz)
+                        "wrist_torque": _vector_space(3),  # 腕部力传感器 (Tx,Ty,Tz)
                     }
                 ),
                 "images": gym.spaces.Dict(
@@ -224,18 +225,20 @@ class AICCableInsertionEnv(gym.Env):
 
     def reset(self, *, seed=None, options=None):
         """重置环境到初始状态。
-        
+
         Args:
             seed: 随机种子
             options: 额外选项
-            
+
         Returns:
             tuple: (观测值, 信息字典)
         """
         super().reset(seed=seed)
         self._episode_step = 0
         self._last_action = np.zeros((6,), dtype=np.float32)
-        wait_for_reset_resume = bool(options.get("wait_for_reset_resume", False)) if options else False
+        wait_for_reset_resume = (
+            bool(options.get("wait_for_reset_resume", False)) if options else False
+        )
 
         if self.fake_env:
             self._fake = self._sample_fake_initial_state()
@@ -244,15 +247,17 @@ class AICCableInsertionEnv(gym.Env):
 
         # 真实环境：调用后端重置并获取初始观测
         self._live.reset_task(wait_for_reset_resume=wait_for_reset_resume)
-        obs = self._live.get_observation(timeout_sec=self.config.observation_timeout_sec)
+        obs = self._live.get_observation(
+            timeout_sec=self.config.observation_timeout_sec
+        )
         return obs, {"succeed": 0}
 
     def step(self, action):
         """执行一步环境交互。
-        
+
         Args:
             action: 6 维动作向量
-            
+
         Returns:
             tuple: (观测值，奖励，是否结束，是否截断，信息字典)
         """
@@ -297,17 +302,19 @@ class AICCableInsertionEnv(gym.Env):
 
     def _step_fake(self, action: np.ndarray):
         """仿真模式下的步进逻辑。
-        
+
         简化模型：动作直接叠加噪声影响状态
-        
+
         Args:
             action: 6 维动作向量
-            
+
         Returns:
             tuple: (观测值，信息字典)
         """
         assert self._fake.state is not None
-        noise = self.np_random.normal(0.0, 0.01, size=self._fake.state.shape).astype(np.float32)
+        noise = self.np_random.normal(0.0, 0.01, size=self._fake.state.shape).astype(
+            np.float32
+        )
         action_effect = np.zeros_like(self._fake.state)
         action_effect[:3] = action[:3] * self.config.action_scale_linear
         action_effect[7:10] = action[:3] * 0.1
@@ -321,31 +328,35 @@ class AICCableInsertionEnv(gym.Env):
 
     def _step_live(self, action: np.ndarray):
         """真实模式下的步进逻辑。
-        
+
         Args:
             action: 6 维动作向量
-            
+
         Returns:
             tuple: (观测值，信息字典)
         """
         info = self._live.apply_action(action)
-        obs = self._live.get_observation(timeout_sec=self.config.observation_timeout_sec)
+        obs = self._live.get_observation(
+            timeout_sec=self.config.observation_timeout_sec
+        )
         return obs, info
 
     def _sample_fake_initial_state(self) -> _FakeTaskState:
         """采样仿真的初始状态。
-        
+
         Returns:
             _FakeTaskState: 初始状态，TCP 位于原点附近，四元数为单位四元数
         """
         base = np.zeros((46,), dtype=np.float32)
-        base[:3] = self.np_random.uniform(low=-0.02, high=0.02, size=(3,)).astype(np.float32)
+        base[:3] = self.np_random.uniform(low=-0.02, high=0.02, size=(3,)).astype(
+            np.float32
+        )
         base[3:7] = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
         return _FakeTaskState(step_count=0, state=base)
 
     def _build_fake_observation(self):
         """构建仿真观测值。
-        
+
         Returns:
             dict: 包含状态和图像的观测字典
         """
@@ -371,12 +382,12 @@ class AICCableInsertionEnv(gym.Env):
 
     def _fake_image(self, camera_index: int) -> np.ndarray:
         """生成仿真相机图像。
-        
+
         生成带有简单图案的假图像用于测试
-        
+
         Args:
             camera_index: 相机索引 (0=左，1=中，2=右)
-            
+
         Returns:
             np.ndarray: RGB 图像数组
         """
@@ -386,13 +397,15 @@ class AICCableInsertionEnv(gym.Env):
         )
         band = (camera_index + 1) * 32
         img[..., camera_index] = band
-        cursor = int((self._episode_step * 3 + camera_index * 11) % self.config.image_width)
-        img[:, max(0, cursor - 2): min(self.config.image_width, cursor + 2), :] = 255
+        cursor = int(
+            (self._episode_step * 3 + camera_index * 11) % self.config.image_width
+        )
+        img[:, max(0, cursor - 2) : min(self.config.image_width, cursor + 2), :] = 255
         return img
 
     def _build_live_backend(self):
         """构建真实 ROS2 后端。
-        
+
         Returns:
             _AICLiveBackend: ROS2 通信后端实例
         """
@@ -401,7 +414,7 @@ class AICCableInsertionEnv(gym.Env):
 
 class _AICLiveBackend:
     """ROS2 支持的 AIC 环境适配器，用于 HIL-SERL。
-    
+
     该类负责：
     1. 与 AIC 控制器进行 ROS2 通信（订阅观测、发布动作）
     2. 管理 TF 坐标系变换
@@ -411,7 +424,7 @@ class _AICLiveBackend:
 
     def __init__(self, config: Any):
         """初始化 ROS2 后端。
-        
+
         Args:
             config: 配置对象，包含话题名、服务名、超时等参数
         """
@@ -422,7 +435,11 @@ class _AICLiveBackend:
 
         import cv2
         import rclpy
-        from aic_control_interfaces.msg import MotionUpdate, TargetMode, TrajectoryGenerationMode
+        from aic_control_interfaces.msg import (
+            MotionUpdate,
+            TargetMode,
+            TrajectoryGenerationMode,
+        )
         from aic_control_interfaces.srv import ChangeTargetMode
         from aic_model_interfaces.msg import Observation
         from geometry_msgs.msg import Twist, Vector3, Wrench
@@ -541,10 +558,13 @@ class _AICLiveBackend:
 
         self._String = String
         self._scripted_intervention_status_pub = self._node.create_publisher(
-            String, "/scripted_intervention/status", 10,
+            String,
+            "/scripted_intervention/status",
+            10,
         )
         self._scripted_intervention_status_timer = self._node.create_timer(
-            1.0 / 30.0, self._publish_scripted_intervention_status,
+            1.0 / 30.0,
+            self._publish_scripted_intervention_status,
         )
 
     def _publish_scripted_intervention_status(self) -> None:
@@ -591,7 +611,9 @@ class _AICLiveBackend:
 
         time.sleep(self.config.post_reset_settle_sec)
         self._publish_zero_twist()
-        self.get_observation(timeout_sec=self.config.observation_timeout_sec, require_new=True)
+        self.get_observation(
+            timeout_sec=self.config.observation_timeout_sec, require_new=True
+        )
 
     def _pause_subscriptions(self):
         """Destroy wrapper subscriptions during reset window to silence their callbacks."""
@@ -632,10 +654,10 @@ class _AICLiveBackend:
 
     def apply_action(self, action: np.ndarray):
         """应用动作命令。
-        
+
         Args:
             action: 6 维动作向量（线速度 + 角速度）
-            
+
         Returns:
             dict: 信息字典，可能包含干预动作
         """
@@ -654,16 +676,18 @@ class _AICLiveBackend:
         time.sleep(self.config.policy_control_period_sec)
         return info
 
-    def get_observation(self, timeout_sec: float | None = None, require_new: bool = False):
+    def get_observation(
+        self, timeout_sec: float | None = None, require_new: bool = False
+    ):
         """获取机器人观测。
-        
+
         Args:
             timeout_sec: 超时时间（秒）
             require_new: 是否要求获取新的观测（而非缓存）
-            
+
         Returns:
             dict: 观测字典
-            
+
         Raises:
             TimeoutError: 超时时抛出异常
         """
@@ -675,10 +699,14 @@ class _AICLiveBackend:
                 with self._obs_lock:
                     if self._latest_obs is not None and self._obs_seq > last_seq:
                         return self._clone_obs(self._latest_obs)
-                remaining = None if deadline is None else max(0.0, deadline - time.time())
+                remaining = (
+                    None if deadline is None else max(0.0, deadline - time.time())
+                )
                 if remaining is not None and remaining == 0.0:
                     raise TimeoutError("Timed out waiting for a fresh AIC observation")
-                self._obs_event.wait(timeout=remaining if remaining is not None else 0.1)
+                self._obs_event.wait(
+                    timeout=remaining if remaining is not None else 0.1
+                )
                 self._obs_event.clear()
         else:
             # 可接受缓存观测的逻辑
@@ -841,14 +869,12 @@ class _AICLiveBackend:
                 scripted_intervention=scripted_intervention,
             )
         except Exception as exc:
-            self._node.get_logger().warn(
-                f"Keyboard intervention disabled: {exc}"
-            )
+            self._node.get_logger().warn(f"Keyboard intervention disabled: {exc}")
             return None
 
     def _observation_callback(self, msg):
         """观测消息回调函数。
-        
+
         Args:
             msg: Observation 消息
         """
@@ -860,10 +886,10 @@ class _AICLiveBackend:
 
     def _adapt_observation(self, obs_msg):
         """适配 ROS2 观测消息为 Gym 格式。
-        
+
         Args:
             obs_msg: Observation ROS2 消息
-            
+
         Returns:
             dict: Gym 格式的观测字典
         """
@@ -925,10 +951,10 @@ class _AICLiveBackend:
 
     def _extract_image(self, image_msg):
         """从 ROS2 图像消息中提取并处理图像。
-        
+
         Args:
             image_msg: ROS2 Image 消息
-            
+
         Returns:
             np.ndarray: 处理后的 RGB 图像
         """
@@ -951,10 +977,10 @@ class _AICLiveBackend:
     @staticmethod
     def _joint_array(values):
         """将关节值列表转换为固定长度数组。
-        
+
         Args:
             values: 关节值列表
-            
+
         Returns:
             np.ndarray: 7 维关节数组，不足补零
         """
@@ -966,15 +992,19 @@ class _AICLiveBackend:
 
     def _publish_action(self, action: np.ndarray):
         """发布动作命令到机器人。
-        
+
         Args:
             action: 6 维动作向量（归一化）
         """
         linear = action[:3] * self.config.action_scale_linear
         angular = action[3:6] * self.config.action_scale_angular
         twist = self._Twist(
-            linear=self._Vector3(x=float(linear[0]), y=float(linear[1]), z=float(linear[2])),
-            angular=self._Vector3(x=float(angular[0]), y=float(angular[1]), z=float(angular[2])),
+            linear=self._Vector3(
+                x=float(linear[0]), y=float(linear[1]), z=float(linear[2])
+            ),
+            angular=self._Vector3(
+                x=float(angular[0]), y=float(angular[1]), z=float(angular[2])
+            ),
         )
         self._motion_pub.publish(self._velocity_motion_update(twist))
 
@@ -988,10 +1018,10 @@ class _AICLiveBackend:
 
     def _velocity_motion_update(self, twist):
         """构建速度模式的 MotionUpdate 消息。
-        
+
         Args:
             twist: Twist 消息（线速度 + 角速度）
-            
+
         Returns:
             MotionUpdate: 运动更新消息
         """
@@ -1006,12 +1036,14 @@ class _AICLiveBackend:
             torque=self._Vector3(x=0.0, y=0.0, z=0.0),
         )
         msg.wrench_feedback_gains_at_tip = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        msg.trajectory_generation_mode.mode = self._TrajectoryGenerationMode.MODE_VELOCITY
+        msg.trajectory_generation_mode.mode = (
+            self._TrajectoryGenerationMode.MODE_VELOCITY
+        )
         return msg
 
     def _ensure_cartesian_mode(self):
         """确保控制器处于笛卡尔模式。
-        
+
         Raises:
             RuntimeError: 服务不可用或切换失败时抛出异常
         """
@@ -1021,7 +1053,9 @@ class _AICLiveBackend:
             )
         req = self._ChangeTargetMode.Request()
         req.target_mode.mode = self._TargetMode.MODE_CARTESIAN
-        response = self._call_service(self._change_target_mode_client, req, timeout_sec=5.0)
+        response = self._call_service(
+            self._change_target_mode_client, req, timeout_sec=5.0
+        )
         if response is None or not response.success:
             raise RuntimeError("Unable to switch AIC controller to cartesian mode")
 
@@ -1032,7 +1066,9 @@ class _AICLiveBackend:
                 f"Tare service unavailable: {self.config.tare_force_torque_service}"
             )
             return
-        response = self._call_service(self._tare_client, self._Trigger.Request(), timeout_sec=3.0)
+        response = self._call_service(
+            self._tare_client, self._Trigger.Request(), timeout_sec=3.0
+        )
         if response is None or not response.success:
             self._node.get_logger().warn("Force-torque tare request failed")
 
@@ -1087,10 +1123,10 @@ class _AICLiveBackend:
     @staticmethod
     def _clone_obs(obs):
         """深拷贝观测字典以避免引用问题。
-        
+
         Args:
             obs: 原始观测字典
-            
+
         Returns:
             dict: 深拷贝后的观测字典
         """
@@ -1102,12 +1138,12 @@ class _AICLiveBackend:
     @staticmethod
     def _call_service(client, request, timeout_sec: float):
         """同步调用 ROS2 服务。
-        
+
         Args:
             client: ROS2 服务客户端
             request: 请求对象
             timeout_sec: 超时时间（秒）
-            
+
         Returns:
             Response or None: 服务响应或超时返回 None
         """
@@ -1133,18 +1169,18 @@ class _KeyboardIntervention:
     """
 
     _KEY_MAPPINGS = {
-        "d": np.array([-1, 0, 0, 0, 0, 0], dtype=np.float32), # -X
+        "d": np.array([-1, 0, 0, 0, 0, 0], dtype=np.float32),  # -X
         "a": np.array([1, 0, 0, 0, 0, 0], dtype=np.float32),  # +X
-        "w": np.array([0, -1, 0, 0, 0, 0], dtype=np.float32), # +Y
+        "w": np.array([0, -1, 0, 0, 0, 0], dtype=np.float32),  # +Y
         "s": np.array([0, 1, 0, 0, 0, 0], dtype=np.float32),  # -Y
-        "j": np.array([0, 0, -1, 0, 0, 0], dtype=np.float32), # +Z
+        "j": np.array([0, 0, -1, 0, 0, 0], dtype=np.float32),  # +Z
         "k": np.array([0, 0, 1, 0, 0, 0], dtype=np.float32),  # -Z
         "q": np.array([0, 0, 0, 1, 0, 0], dtype=np.float32),  # +Rx
-        "e": np.array([0, 0, 0, -1, 0, 0], dtype=np.float32), # -Rx
-        "u": np.array([0, 0, 0, 0, -1, 0], dtype=np.float32), # +Ry
+        "e": np.array([0, 0, 0, -1, 0, 0], dtype=np.float32),  # -Rx
+        "u": np.array([0, 0, 0, 0, -1, 0], dtype=np.float32),  # +Ry
         "i": np.array([0, 0, 0, 0, 1, 0], dtype=np.float32),  # -Ry
         "o": np.array([0, 0, 0, 0, 0, 1], dtype=np.float32),  # +Rz
-        "p": np.array([0, 0, 0, 0, 0, -1], dtype=np.float32), # -Rz
+        "p": np.array([0, 0, 0, 0, 0, -1], dtype=np.float32),  # -Rz
     }
 
     def __init__(self, logger=None, scripted_intervention=None):

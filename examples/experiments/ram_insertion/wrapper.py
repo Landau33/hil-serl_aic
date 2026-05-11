@@ -8,16 +8,17 @@ from pynput import keyboard
 
 from franka_env.envs.franka_env import FrankaEnv
 
+
 class RAMEnv(FrankaEnv):
     """RAM（随机存取存储器）插入环境。
-    
+
     继承自 FrankaEnv，专为 RAM 条插入任务设计的机器人环境。
     支持键盘干预（F1 键触发重新抓取）和自定义重置逻辑。
     """
-    
+
     def __init__(self, **kwargs):
         """初始化 RAM 环境。
-        
+
         Args:
             **kwargs: 传递给父类 FrankaEnv 的参数
         """
@@ -26,22 +27,21 @@ class RAMEnv(FrankaEnv):
 
         def on_press(key):
             """键盘按下回调函数。
-            
+
             Args:
                 key: 按下的键
             """
             if str(key) == "Key.f1":
                 self.should_regrasp = True  # F1 键触发重新抓取标志
 
-        listener = keyboard.Listener(
-            on_press=on_press)
+        listener = keyboard.Listener(on_press=on_press)
         listener.start()  # 启动键盘监听器
 
     def go_to_reset(self, joint_reset=False):
         """移动到重置位置。
-        
+
         在基类定义的基础上，增加 Z 轴偏移以避免与物体碰撞。
-        
+
         Args:
             joint_reset: 是否执行关节重置
         """
@@ -49,7 +49,9 @@ class RAMEnv(FrankaEnv):
         self._update_currpos()  # 更新当前位置
         self._send_pos_command(self.currpos)  # 发送位置命令保持当前位置
         time.sleep(0.3)
-        requests.post(self.url + "update_param", json=self.config.PRECISION_PARAM)  # 切换到精度模式
+        requests.post(
+            self.url + "update_param", json=self.config.PRECISION_PARAM
+        )  # 切换到精度模式
 
         # 向上提起，避免碰撞
         self._update_currpos()
@@ -83,10 +85,9 @@ class RAMEnv(FrankaEnv):
         # 切换回柔顺模式
         requests.post(self.url + "update_param", json=self.config.COMPLIANCE_PARAM)
 
-
     def regrasp(self):
         """重新抓取 RAM 条。
-        
+
         用于在抓取失败或需要调整抓取姿态时重新执行抓取流程。
         包含人工交互步骤，需要操作员手动放置 RAM 条。
         """
@@ -94,7 +95,9 @@ class RAMEnv(FrankaEnv):
         self._update_currpos()
         self._send_pos_command(self.currpos)
         time.sleep(0.3)
-        requests.post(self.url + "update_param", json=self.config.PRECISION_PARAM)  # 精度模式
+        requests.post(
+            self.url + "update_param", json=self.config.PRECISION_PARAM
+        )  # 精度模式
 
         # 向上提起
         self._update_currpos()
@@ -105,10 +108,10 @@ class RAMEnv(FrankaEnv):
         # 人工交互：释放夹爪
         input("Press enter to release gripper...")
         self._send_gripper_command(1.0)  # 打开夹爪
-        
+
         # 人工交互：放置 RAM 并重新抓取
         input("Place RAM in holder and press enter to grasp...")
-        
+
         # 移动到抓取位置上方
         top_pose = self.config.GRASP_POSE.copy()
         top_pose[2] += 0.05  # 上方 5cm
@@ -134,19 +137,18 @@ class RAMEnv(FrankaEnv):
         self.interpolate_move(self.config.RESET_POSE, timeout=1)
         time.sleep(0.5)
 
-
     def reset(self, joint_reset=False, **kwargs):
         """重置环境到初始状态。
-        
+
         Args:
             joint_reset: 是否执行关节重置
             **kwargs: 其他参数
-            
+
         Returns:
             tuple: (观测值，信息字典)
         """
         self.last_gripper_act = time.time()
-        
+
         # 保存视频录制（如果启用）
         if self.save_video:
             self.save_video_recording()
@@ -165,9 +167,9 @@ class RAMEnv(FrankaEnv):
         # 获取初始观测
         self._update_currpos()
         obs = self._get_obs()
-        
+
         # 切换到柔顺模式
         requests.post(self.url + "update_param", json=self.config.COMPLIANCE_PARAM)
-        
+
         self.terminate = False  # 重置终止标志
         return obs, {}

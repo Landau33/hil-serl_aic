@@ -14,7 +14,9 @@ from experiments.mappings import CONFIG_MAPPING
 
 FLAGS = flags.FLAGS
 flags.DEFINE_string("exp_name", None, "Name of experiment corresponding to folder.")
-flags.DEFINE_integer("successes_needed", 200, "Number of successful transistions to collect.")
+flags.DEFINE_integer(
+    "successes_needed", 200, "Number of successful transistions to collect."
+)
 flags.DEFINE_integer(
     "success_window",
     10,
@@ -34,7 +36,9 @@ def on_press(key):
             success_key = True
         elif hasattr(key, "char") and key.char == "r":
             reset_key = True
-            if active_env is not None and hasattr(active_env.unwrapped, "notify_reset_resume_keypress"):
+            if active_env is not None and hasattr(
+                active_env.unwrapped, "notify_reset_resume_keypress"
+            ):
                 active_env.unwrapped.notify_reset_resume_keypress()
     except AttributeError:
         pass
@@ -45,15 +49,16 @@ def main(_):
     try:
         from pynput import keyboard
     except ImportError as exc:
-        raise RuntimeError("pynput requires a graphical session. Set DISPLAY or run under X11.") from exc
+        raise RuntimeError(
+            "pynput requires a graphical session. Set DISPLAY or run under X11."
+        ) from exc
 
-    listener = keyboard.Listener(
-        on_press=on_press)
+    listener = keyboard.Listener(on_press=on_press)
     listener.start()
     env = None
     pbar = None
     try:
-        assert FLAGS.exp_name in CONFIG_MAPPING, 'Experiment folder not found.'
+        assert FLAGS.exp_name in CONFIG_MAPPING, "Experiment folder not found."
         config = CONFIG_MAPPING[FLAGS.exp_name]()
         env = config.get_environment(fake_env=False, save_video=False, classifier=False)
         active_env = env
@@ -65,9 +70,9 @@ def main(_):
         success_window_remaining = 0
         auto_reset_after_success = False
         pbar = tqdm(total=success_needed)
-        
+
         while len(successes) < success_needed:
-            actions = np.zeros(env.action_space.sample().shape) 
+            actions = np.zeros(env.action_space.sample().shape)
             next_obs, rew, done, truncated, info = env.step(actions)
             if "intervene_action" in info:
                 actions = info["intervene_action"]
@@ -84,7 +89,9 @@ def main(_):
             )
             obs = next_obs
             if success_key:
-                success_window_remaining = max(success_window_remaining, FLAGS.success_window)
+                success_window_remaining = max(
+                    success_window_remaining, FLAGS.success_window
+                )
                 auto_reset_after_success = True
                 success_key = False
 
@@ -126,6 +133,7 @@ def main(_):
         listener.stop()
         if env is not None:
             env.close()
-        
+
+
 if __name__ == "__main__":
     app.run(main)

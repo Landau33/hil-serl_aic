@@ -23,6 +23,7 @@ def construct_adjoint_matrix(tcp_pose):
     adjoint_matrix[3:, :3] = skew_matrix @ rotation
     return adjoint_matrix
 
+
 def construct_transform_matrix(tcp_pose):
     """
     Construct the transform matrix from given pose.
@@ -34,6 +35,7 @@ def construct_transform_matrix(tcp_pose):
     transform_matrix[:3, :3] = rotation
     transform_matrix[3:, 3:] = rotation
     return transform_matrix
+
 
 def construct_homogeneous_matrix(tcp_pose):
     """
@@ -47,6 +49,7 @@ def construct_homogeneous_matrix(tcp_pose):
     T[:3, 3] = translation
     T[3, 3] = 1
     return T
+
 
 def construct_adjoint_matrix_from_euler(tcp_pose):
     """

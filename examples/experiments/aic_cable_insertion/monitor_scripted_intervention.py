@@ -9,6 +9,7 @@ Usage:
     # or
     python examples/experiments/aic_cable_insertion/monitor_scripted_intervention.py
 """
+
 from __future__ import annotations
 
 import json
@@ -85,19 +86,17 @@ def render(status: dict | None, age: float | None) -> str:
     stuck_steps = int(status.get("stuck_steps", 0))
     complete = bool(status.get("complete", False))
 
-    active_str = (
-        f"{CSI_GREEN}ON{CSI_RESET}" if active else f"{CSI_DIM}off{CSI_RESET}"
-    )
+    active_str = f"{CSI_GREEN}ON{CSI_RESET}" if active else f"{CSI_DIM}off{CSI_RESET}"
     phase_color = {
-        "align": CSI_YELLOW, "pause": CSI_DIM, "insert": CSI_GREEN,
+        "align": CSI_YELLOW,
+        "pause": CSI_DIM,
+        "insert": CSI_GREEN,
     }.get(phase, "")
     complete_str = (
         f"{CSI_GREEN}done{CSI_RESET}" if complete else f"{CSI_DIM}-{CSI_RESET}"
     )
 
-    age_str = (
-        f"{CSI_DIM}{age:.2f}s ago{CSI_RESET}" if age is not None else ""
-    )
+    age_str = f"{CSI_DIM}{age:.2f}s ago{CSI_RESET}" if age is not None else ""
 
     lines += [
         "",
@@ -121,7 +120,9 @@ def main() -> int:
     rclpy.init()
     node = StatusMonitor()
     spin_thread = threading.Thread(
-        target=rclpy.spin, args=(node,), daemon=True,
+        target=rclpy.spin,
+        args=(node,),
+        daemon=True,
     )
     spin_thread.start()
     period = 1.0 / REFRESH_HZ

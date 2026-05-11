@@ -51,7 +51,12 @@ class MemoryEfficientReplayBufferDataStore(MemoryEfficientReplayBuffer, DataStor
         **kwargs,
     ):
         MemoryEfficientReplayBuffer.__init__(
-            self, observation_space, action_space, capacity, pixel_keys=image_keys, **kwargs
+            self,
+            observation_space,
+            action_space,
+            capacity,
+            pixel_keys=image_keys,
+            **kwargs,
         )
         DataStoreBase.__init__(self, capacity)
         self._lock = Lock()
