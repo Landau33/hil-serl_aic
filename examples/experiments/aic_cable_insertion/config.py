@@ -54,7 +54,7 @@ class EnvConfig:
 
     use_sim_time: bool = True
     suppress_ros_warnings: bool = True
-    observation_topic: str = "observations_roi"
+    observation_topic: str = "observations_masked_roi"
     pose_command_topic: str = "/aic_controller/pose_commands"
     change_target_mode_service: str = "/aic_controller/change_target_mode"
     tare_force_torque_service: str = "/aic_controller/tare_force_torque_sensor"
@@ -124,9 +124,9 @@ class EnvConfig:
     scripted_intervention_persistent_angular_stuck_window_steps: int = 4
     scripted_intervention_persistent_angular_progress_threshold_rad: float = 0.002
     scripted_intervention_persistent_angular_boost: float = 3.0
-    scripted_intervention_stuck_search_linear_velocity: float = 0.003
+    scripted_intervention_stuck_search_linear_velocity: float = 0.005
     scripted_intervention_stuck_search_angular_velocity: float = 0.0
-    scripted_intervention_stuck_search_period_steps: int = 16
+    scripted_intervention_stuck_search_period_steps: int = 8
     scripted_intervention_stuck_search_ramp_steps: int = 6
 
 
