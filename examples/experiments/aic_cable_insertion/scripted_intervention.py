@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -91,16 +92,16 @@ class ScriptedInterventionConfig:
     max_angular_velocity: float = 0.04
     # Insert phase scaling (slows axial descent)
     insert_linear_velocity_scale: float = 1.0 / 3.0
-    min_insert_z_velocity: float = 0.004
+    min_insert_z_velocity: float = 0.002
     min_insert_xy_correction_velocity: float = 0.002
     min_insert_angular_correction_velocity: float = 0.006
     # Action output scaling
     action_scale_linear: float = 0.005
     action_scale_angular: float = 0.02
     # Deadbands and tolerances
-    linear_deadband_m: float = 0.0015
+    linear_deadband_m: float = 0.001
     angular_deadband_rad: float = 0.03
-    xy_align_tolerance_m: float = 0.0015
+    xy_align_tolerance_m: float = 0.001
     z_insert_tolerance_m: float = 0.0015
     orientation_align_tolerance_rad: float = 0.05
     # Lift safety: if tip is on the entry side, but too close to the port AND
@@ -116,6 +117,10 @@ class ScriptedInterventionConfig:
     align_stuck_window_steps: int = 8
     align_stuck_xy_progress_threshold_m: float = 0.0002
     align_stuck_xy_min_velocity: float = 0.01
+    # Lateral velocity decay near target in align (suppresses overshoot).
+    # |v| is scaled by min(1, lateral_error_norm / align_decay_radius_m).
+    # Set 0 to disable.
+    align_decay_radius_m: float = 0.005
     # Insert stall detection + aggressive recovery.
     # Hysteresis: a small `stuck_z_progress_threshold_m` decides whether progress
     # this step counts as "still descending" (stuck stays False). Once stuck has
@@ -145,7 +150,19 @@ class ScriptedInterventionConfig:
     stuck_search_angular_velocity: float = 0.000
     stuck_search_period_steps: int = 8
     stuck_search_ramp_steps: int = 6
+    # Lateral pulse while stuck: periodically inject a strong directional
+    # velocity along lateral_error_raw (toward target xy), bypassing the
+    # deadband. Designed to break sim mesh contact overlap caused by a
+    # sub-millimeter horizontal misalignment that the normal PD path
+    # (zeroed by the deadband once inside tolerance) cannot push through.
+    # Set stuck_lateral_pulse_velocity to 0 to disable.
+    stuck_lateral_pulse_velocity: float = 0.01
+    stuck_lateral_pulse_steps: int = 4
+    stuck_lateral_pulse_period_steps: int = 16
     warn_interval_sec: float = 2.0
+    # Per-step state log. Empty string disables. Append-only JSONL.
+    log_path: str = "/tmp/scripted_intervention.log.jsonl"
+    log_every_n_steps: int = 1
 
 
 @dataclass(frozen=True)
@@ -195,6 +212,8 @@ class ScriptedCableInsertionIntervention:
         self._config = config
         self._active = False
         self._last_warning_time = 0.0
+        self._log_file = None
+        self._log_step = 0
         self._reset_state()
 
     def _reset_state(self) -> None:
@@ -228,12 +247,30 @@ class ScriptedCableInsertionIntervention:
             return self._active
         self._active = active
         self._reset_state()
+        if active:
+            self._truncate_log()
         state = "enabled" if self._active else "disabled"
         self._logger.info(
             f"Scripted intervention {state}: "
             f"{self._config.tip_frame} -> {self._config.port_frame}"
         )
         return self._active
+
+    def _truncate_log(self) -> None:
+        cfg = self._config
+        if not cfg.log_path:
+            return
+        try:
+            if self._log_file is not None:
+                self._log_file.close()
+        except Exception:
+            pass
+        self._log_file = None
+        self._log_step = 0
+        try:
+            open(cfg.log_path, "w").close()
+        except Exception:
+            pass
 
     def toggle(self) -> bool:
         return self.set_active(not self._active)
@@ -390,13 +427,88 @@ class ScriptedCableInsertionIntervention:
 
         self._last_abs_angular_error = np.abs(angular_error)
         # z-axis reached target → emit zeros instead of trickle PD output.
-        if self.is_complete():
+        complete = self.is_complete()
+        if complete:
+            linear_velocity = np.zeros(3, dtype=np.float64)
+            angular_velocity = np.zeros(3, dtype=np.float64)
+        self._log_step_state(
+            phase=self._phase,
+            complete=complete,
+            position_error=position_error,
+            lateral_error_raw=lateral_error_raw,
+            lateral_error_norm=lateral_error_norm,
+            axial_error=axial_error,
+            angular_error=angular_error,
+            port_x_axis=port_x_axis,
+            port_y_axis=port_y_axis,
+            port_z_axis=port_z_axis,
+            linear_velocity=linear_velocity,
+            angular_velocity=angular_velocity,
+        )
+        if complete:
             return np.zeros((6,), dtype=np.float32)
         linear_action = linear_velocity / max(cfg.action_scale_linear, 1e-9)
         angular_action = angular_velocity / max(cfg.action_scale_angular, 1e-9)
         return np.concatenate((linear_action, angular_action), axis=0).astype(
             np.float32
         )
+
+    def _log_step_state(
+        self,
+        *,
+        phase: str,
+        complete: bool,
+        position_error: np.ndarray,
+        lateral_error_raw: np.ndarray,
+        lateral_error_norm: float,
+        axial_error: float,
+        angular_error: np.ndarray,
+        port_x_axis: np.ndarray,
+        port_y_axis: np.ndarray,
+        port_z_axis: np.ndarray,
+        linear_velocity: np.ndarray,
+        angular_velocity: np.ndarray,
+    ) -> None:
+        cfg = self._config
+        if not cfg.log_path:
+            return
+        self._log_step += 1
+        if self._log_step % max(int(cfg.log_every_n_steps), 1) != 0:
+            return
+        try:
+            if self._log_file is None:
+                self._log_file = open(cfg.log_path, "a", buffering=1)
+            record = {
+                "t": time.time(),
+                "step": self._log_step,
+                "phase": phase,
+                "complete": bool(complete),
+                "active": bool(self._active),
+                "lat_err_norm_mm": round(lateral_error_norm * 1000.0, 3),
+                "ax_err_mm": round(axial_error * 1000.0, 3),
+                "ang_err_norm_rad": round(float(np.linalg.norm(angular_error)), 4),
+                "pos_err_base_mm": [
+                    round(float(v) * 1000.0, 3) for v in position_error
+                ],
+                "lat_err_base_mm": [
+                    round(float(v) * 1000.0, 3) for v in lateral_error_raw
+                ],
+                "ang_err_xyz_rad": [round(float(v), 4) for v in angular_error],
+                "port_x_axis": [round(float(v), 3) for v in port_x_axis],
+                "port_y_axis": [round(float(v), 3) for v in port_y_axis],
+                "port_z_axis": [round(float(v), 3) for v in port_z_axis],
+                "lin_v_base_mm_s": [
+                    round(float(v) * 1000.0, 3) for v in linear_velocity
+                ],
+                "ang_v_xyz_rad_s": [round(float(v), 4) for v in angular_velocity],
+                "align_stuck": bool(self._align_stuck_active),
+                "stuck": bool(self._stuck_active),
+                "stuck_steps": int(self._insert_stuck_steps),
+                "stuck_search_steps": int(self._stuck_search_steps),
+            }
+            self._log_file.write(json.dumps(record) + "\n")
+        except Exception:
+            self._log_file = None
 
     # -- Lift phase -----------------------------------------------------------
 
@@ -452,6 +564,9 @@ class ScriptedCableInsertionIntervention:
             -cfg.max_linear_velocity,
             cfg.max_linear_velocity,
         )
+        if cfg.align_decay_radius_m > 0.0:
+            decay = min(1.0, lateral_error_norm / max(cfg.align_decay_radius_m, 1e-9))
+            linear_velocity = linear_velocity * decay
         if self._align_stuck_active:
             self._apply_min_directional_velocity(
                 velocity=linear_velocity,
@@ -537,21 +652,22 @@ class ScriptedCableInsertionIntervention:
             min_velocity=cfg.min_insert_xy_correction_velocity,
             velocity_limit=gains.lateral_velocity_limit,
         )
-        # Axial descent — gated on alignment
-        if aligned:
-            axial_velocity = float(
-                np.clip(
-                    axial_error_pd * gains.axial_gain,
-                    -gains.axial_velocity_limit,
-                    gains.axial_velocity_limit,
-                )
+        # Axial descent — always on in insert phase. Pure PD + min-velocity
+        # floor, decoupled from lateral/angular alignment quality so z speed
+        # stays steady even when horizontal correction is mid-flight.
+        axial_velocity = float(
+            np.clip(
+                axial_error_pd * gains.axial_gain,
+                -gains.axial_velocity_limit,
+                gains.axial_velocity_limit,
             )
-            if abs(axial_error_pd) >= cfg.z_insert_tolerance_m:
-                axial_velocity = float(np.sign(axial_error_pd)) * max(
-                    abs(axial_velocity),
-                    gains.min_insert_axial_velocity,
-                )
-            linear_velocity += axial_velocity * port_z_axis
+        )
+        if abs(axial_error_pd) >= cfg.z_insert_tolerance_m:
+            axial_velocity = float(np.sign(axial_error_pd)) * max(
+                abs(axial_velocity),
+                gains.min_insert_axial_velocity,
+            )
+        linear_velocity += axial_velocity * port_z_axis
 
         angular_velocity = np.clip(
             angular_error * gains.angular_gain,
@@ -584,8 +700,46 @@ class ScriptedCableInsertionIntervention:
                 max_linear_velocity=gains.linear_velocity_limit,
                 port_z_axis=port_z_axis,
             )
+            self._apply_stuck_lateral_pulse(
+                lateral_error_raw=lateral_error_raw,
+                linear_velocity=linear_velocity,
+                gains=gains,
+            )
 
         return linear_velocity, angular_velocity
+
+    def _apply_stuck_lateral_pulse(
+        self,
+        *,
+        lateral_error_raw: np.ndarray,
+        linear_velocity: np.ndarray,
+        gains: _InsertGains,
+    ) -> None:
+        """Periodic lateral nudge toward target while stuck.
+
+        Bypasses the deadband: uses ``lateral_error_raw`` direction so
+        sub-millimeter horizontal misalignment (that the PD path zeros out)
+        still produces a clear lateral push that can break sim mesh contact
+        overlap. On for ``stuck_lateral_pulse_steps`` out of every
+        ``stuck_lateral_pulse_period_steps`` steps.
+        """
+        cfg = self._config
+        if cfg.stuck_lateral_pulse_velocity <= 0.0:
+            return
+        period = max(int(cfg.stuck_lateral_pulse_period_steps), 1)
+        pulse_width = max(int(cfg.stuck_lateral_pulse_steps), 0)
+        if pulse_width <= 0:
+            return
+        phase_step = self._stuck_search_steps % period
+        if phase_step >= pulse_width:
+            return
+        err_norm = float(np.linalg.norm(lateral_error_raw))
+        if err_norm < 1e-9:
+            return
+        direction = lateral_error_raw / err_norm
+        bias = direction * cfg.stuck_lateral_pulse_velocity
+        limit = gains.linear_velocity_limit
+        linear_velocity[:] = np.clip(linear_velocity + bias, -limit, limit)
 
     def _update_insert_stuck_state(self, *, axial_error: float) -> None:
         cfg = self._config
