@@ -47,7 +47,6 @@ def format_status(step: int, status: dict) -> str:
         f"lat_err={status['lateral_error_norm']:.4f} "
         f"ax_err={status['axial_error']:+.4f} "
         f"ang_err={status['angular_error_norm']:.4f} "
-        f"align_stuck={status.get('align_stuck', False)} "
         f"stuck={status.get('stuck', False)} "
         f"stuck_steps={status.get('stuck_steps', 0)} "
         f"complete={status['complete']}"

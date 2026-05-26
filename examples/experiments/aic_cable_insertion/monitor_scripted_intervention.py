@@ -81,7 +81,6 @@ def render(status: dict | None, age: float | None) -> str:
     xy = float(status.get("lateral_error_norm", 0.0))
     z = float(abs(status.get("axial_error", 0.0)))
     ang = float(status.get("angular_error_norm", 0.0))
-    align_stuck = bool(status.get("align_stuck", False))
     stuck = bool(status.get("stuck", False))
     stuck_steps = int(status.get("stuck_steps", 0))
     complete = bool(status.get("complete", False))
@@ -106,8 +105,7 @@ def render(status: dict | None, age: float | None) -> str:
         f"  axial   : {_color(z, good=0.0015, warn=0.005)}{z*1000:7.3f} mm{CSI_RESET}",
         f"  ang err : {_color(ang, good=0.05, warn=0.15)}{ang:7.4f} rad{CSI_RESET}",
         "",
-        f"  {_bool_tag('align_stuck', align_stuck, true_color=CSI_YELLOW)}    "
-        f"{_bool_tag('stuck', stuck)}    "
+        f"  {_bool_tag('stuck', stuck)}    "
         f"{CSI_DIM}stuck_steps={stuck_steps}{CSI_RESET}",
         "",
         f"  {age_str}",

@@ -282,6 +282,11 @@ class AICCableInsertionEnv(gym.Env):
         if self._live is not None:
             self._live.close()
 
+    def stop_motion(self):
+        """停止当前机器人速度命令。"""
+        if self._live is not None:
+            self._live.stop_motion()
+
     def notify_reset_resume_keypress(self):
         """通知环境收到了一次 reset 恢复按键。"""
         if self._live is not None:
@@ -732,6 +737,10 @@ class _AICLiveBackend:
         if self._initialized_rclpy and self._rclpy.ok():
             self._rclpy.shutdown()
 
+    def stop_motion(self):
+        """发布零速度命令以停止机器人。"""
+        self._publish_zero_twist()
+
     def _make_intervention(self):
         """创建键盘干预对象。
 
@@ -761,7 +770,8 @@ class _AICLiveBackend:
                         insert_linear_velocity_scale=(
                             self.config.scripted_intervention_insert_linear_velocity_scale
                         ),
-                        max_linear_velocity=self.config.intervention_linear_velocity,
+                        max_linear_velocity=self.config.intervention_linear_velocity
+                        * 0.5,
                         max_angular_velocity=self.config.intervention_angular_velocity,
                         min_insert_z_velocity=(
                             self.config.scripted_intervention_min_insert_z_velocity
@@ -788,27 +798,8 @@ class _AICLiveBackend:
                         safe_axial_clearance_m=(
                             self.config.scripted_intervention_safe_axial_clearance_m
                         ),
-                        lift_trigger_axial_clearance_m=(
-                            self.config.scripted_intervention_lift_trigger_axial_clearance_m
-                        ),
                         lift_lateral_threshold_m=(
                             self.config.scripted_intervention_lift_lateral_threshold_m
-                        ),
-                        align_stuck_window_steps=(
-                            self.config.scripted_intervention_align_stuck_window_steps
-                        ),
-                        align_stuck_xy_progress_threshold_m=(
-                            self.config.scripted_intervention_align_stuck_xy_progress_threshold_m
-                        ),
-                        align_stuck_xy_min_velocity=(
-                            self.config.scripted_intervention_align_stuck_xy_min_velocity
-                        ),
-                        stuck_window_steps=self.config.scripted_intervention_stuck_window_steps,
-                        stuck_z_progress_threshold_m=(
-                            self.config.scripted_intervention_stuck_z_progress_threshold_m
-                        ),
-                        stuck_recover_progress_threshold_m=(
-                            self.config.scripted_intervention_stuck_recover_progress_threshold_m
                         ),
                         aggressive_insert_xy_gain=(
                             self.config.scripted_intervention_aggressive_insert_xy_gain
@@ -831,35 +822,8 @@ class _AICLiveBackend:
                         aggressive_min_insert_z_velocity=(
                             self.config.scripted_intervention_aggressive_min_insert_z_velocity
                         ),
-                        stuck_target_xy_min_velocity=(
-                            self.config.scripted_intervention_stuck_target_xy_min_velocity
-                        ),
-                        stuck_directional_linear_boost=(
-                            self.config.scripted_intervention_stuck_directional_linear_boost
-                        ),
-                        stuck_directional_angular_boost=(
-                            self.config.scripted_intervention_stuck_directional_angular_boost
-                        ),
-                        persistent_angular_stuck_window_steps=(
-                            self.config.scripted_intervention_persistent_angular_stuck_window_steps
-                        ),
-                        persistent_angular_progress_threshold_rad=(
-                            self.config.scripted_intervention_persistent_angular_progress_threshold_rad
-                        ),
-                        persistent_angular_boost=(
-                            self.config.scripted_intervention_persistent_angular_boost
-                        ),
                         stuck_search_linear_velocity=(
                             self.config.scripted_intervention_stuck_search_linear_velocity
-                        ),
-                        stuck_search_angular_velocity=(
-                            self.config.scripted_intervention_stuck_search_angular_velocity
-                        ),
-                        stuck_search_period_steps=(
-                            self.config.scripted_intervention_stuck_search_period_steps
-                        ),
-                        stuck_search_ramp_steps=(
-                            self.config.scripted_intervention_stuck_search_ramp_steps
                         ),
                     ),
                 )

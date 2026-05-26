@@ -7,12 +7,10 @@ import numpy as np
 from serl_launcher.wrappers.chunking import ChunkingWrapper
 from serl_launcher.wrappers.serl_obs_wrappers import SERLObsWrapper
 
+from scipy.spatial.transform import Rotation
+
 from experiments.aic_cable_insertion.scripted_intervention import (
     _pose_from_transform,
-    _quat_inverse_xyzw,
-    _quat_multiply_xyzw,
-    _quat_to_rotvec_xyzw,
-    _rotate_vector_by_quat_xyzw,
 )
 from experiments.aic_cable_insertion.wrapper import AICCableInsertionEnv
 from experiments.config import DefaultTrainingConfig
@@ -40,7 +38,7 @@ class EnvConfig:
     action_scale_linear: float = 0.01
     action_scale_angular: float = 0.05
     control_frame_id: str = "base_link"
-    max_episode_length: int = 500
+    max_episode_length: int = 400
     policy_control_period_sec: float = 0.10
     # Geometric reward classifier thresholds.
     # Position is decomposed along port_z: lateral = perpendicular plane, axial = along port_z.
@@ -86,7 +84,7 @@ class EnvConfig:
     )
     scripted_intervention_port_frame: str = os.environ.get(
         "AIC_SCRIPTED_PORT_FRAME",
-        "task_board/sc_port_0/sc_port_base_link",
+        "task_board/sc_port_1/sc_port_base_link",
     )
     scripted_intervention_align_linear_gain: float = 8.0
     scripted_intervention_insert_xy_gain: float = 12.0
@@ -97,37 +95,21 @@ class EnvConfig:
     scripted_intervention_min_insert_z_velocity: float = 0.004
     scripted_intervention_min_insert_xy_correction_velocity: float = 0.003
     scripted_intervention_min_insert_angular_correction_velocity: float = 0.01
-    scripted_intervention_linear_deadband_m: float = 0.0005
-    scripted_intervention_angular_deadband_rad: float = 0.01
-    scripted_intervention_xy_align_tolerance_m: float = 0.0005
-    scripted_intervention_z_insert_tolerance_m: float = 0.00015
+    scripted_intervention_linear_deadband_m: float = 0.00005
+    scripted_intervention_angular_deadband_rad: float = 0.001
+    scripted_intervention_xy_align_tolerance_m: float = 0.00005
+    scripted_intervention_z_insert_tolerance_m: float = 0.000015
     scripted_intervention_orientation_align_tolerance_rad: float = 0.03
-    scripted_intervention_safe_axial_clearance_m: float = 0.015
-    scripted_intervention_lift_trigger_axial_clearance_m: float = 0.010
-    scripted_intervention_lift_lateral_threshold_m: float = 0.002
-    scripted_intervention_align_stuck_window_steps: int = 8
-    scripted_intervention_align_stuck_xy_progress_threshold_m: float = 0.0002
-    scripted_intervention_align_stuck_xy_min_velocity: float = 0.01
-    scripted_intervention_stuck_window_steps: int = 2
-    scripted_intervention_stuck_z_progress_threshold_m: float = 0.0001
-    scripted_intervention_stuck_recover_progress_threshold_m: float = 0.002
+    scripted_intervention_safe_axial_clearance_m: float = 0.014
+    scripted_intervention_lift_lateral_threshold_m: float = 0.005
     scripted_intervention_aggressive_insert_xy_gain: float = 30.0
     scripted_intervention_aggressive_insert_z_gain: float = 25.0
     scripted_intervention_aggressive_insert_angular_gain: float = 3
-    scripted_intervention_aggressive_max_linear_velocity: float = 0.04
+    scripted_intervention_aggressive_max_linear_velocity: float = 0.015
     scripted_intervention_aggressive_xy_velocity_scale: float = 1.0
-    scripted_intervention_aggressive_z_velocity_scale: float = 1.0
+    scripted_intervention_aggressive_z_velocity_scale: float = 0.5
     scripted_intervention_aggressive_min_insert_z_velocity: float = 0.008
-    scripted_intervention_stuck_target_xy_min_velocity: float = 0.012
-    scripted_intervention_stuck_directional_linear_boost: float = 2.4
-    scripted_intervention_stuck_directional_angular_boost: float = 2.2
-    scripted_intervention_persistent_angular_stuck_window_steps: int = 4
-    scripted_intervention_persistent_angular_progress_threshold_rad: float = 0.002
-    scripted_intervention_persistent_angular_boost: float = 3.0
-    scripted_intervention_stuck_search_linear_velocity: float = 0.005
-    scripted_intervention_stuck_search_angular_velocity: float = 0.0
-    scripted_intervention_stuck_search_period_steps: int = 8
-    scripted_intervention_stuck_search_ramp_steps: int = 6
+    scripted_intervention_stuck_search_linear_velocity: float = 0.01
 
 
 class TrainConfig(DefaultTrainingConfig):
@@ -265,16 +247,17 @@ class AICCoordinateRewardClassifierWrapper(gym.Wrapper):
         port_pos, port_quat = _pose_from_transform(port_tf)
         tip_pos, tip_quat = _pose_from_transform(tip_tf)
         position_error = port_pos - tip_pos
-        port_z_axis = _rotate_vector_by_quat_xyzw(
-            np.array([0.0, 0.0, 1.0], dtype=np.float64),
-            port_quat,
-        )
+        port_rot = Rotation.from_quat(port_quat)
+        port_z_axis = port_rot.as_matrix()[:, 2]
         axial_error = float(np.dot(position_error, port_z_axis))
         lateral_error = float(
             np.linalg.norm(position_error - axial_error * port_z_axis)
         )
-        quat_err = _quat_multiply_xyzw(port_quat, _quat_inverse_xyzw(tip_quat))
-        ang_err = float(np.linalg.norm(_quat_to_rotvec_xyzw(quat_err)))
+        ang_err = float(
+            np.linalg.norm(
+                (port_rot * Rotation.from_quat(tip_quat).inv()).as_rotvec()
+            )
+        )
         ok = (
             lateral_error <= self._lateral_tol
             and abs(axial_error) <= self._axial_tol
