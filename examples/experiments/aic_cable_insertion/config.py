@@ -84,7 +84,7 @@ class EnvConfig:
     )
     scripted_intervention_port_frame: str = os.environ.get(
         "AIC_SCRIPTED_PORT_FRAME",
-        "task_board/sc_port_1/sc_port_base_link",
+        "task_board/sc_port_0/sc_port_base_link",
     )
     scripted_intervention_align_linear_gain: float = 8.0
     scripted_intervention_insert_xy_gain: float = 12.0
@@ -254,9 +254,7 @@ class AICCoordinateRewardClassifierWrapper(gym.Wrapper):
             np.linalg.norm(position_error - axial_error * port_z_axis)
         )
         ang_err = float(
-            np.linalg.norm(
-                (port_rot * Rotation.from_quat(tip_quat).inv()).as_rotvec()
-            )
+            np.linalg.norm((port_rot * Rotation.from_quat(tip_quat).inv()).as_rotvec())
         )
         ok = (
             lateral_error <= self._lateral_tol

@@ -2,6 +2,8 @@
 
 import glob
 import time
+import sys
+import threading
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -143,19 +145,37 @@ reset_key = False
 success_key = False
 
 
-def on_press(key):
+def _handle_control_char(char: str):
     global active_env, reset_key, success_key
+    if char == "r":
+        reset_key = True
+        if active_env is not None and hasattr(
+            active_env.unwrapped, "notify_reset_resume_keypress"
+        ):
+            active_env.unwrapped.notify_reset_resume_keypress()
+    elif char == "h":
+        success_key = True
+
+
+def on_press(key):
     try:
-        if hasattr(key, "char") and key.char == "r":
-            reset_key = True
-            if active_env is not None and hasattr(
-                active_env.unwrapped, "notify_reset_resume_keypress"
-            ):
-                active_env.unwrapped.notify_reset_resume_keypress()
-        elif hasattr(key, "char") and key.char == "h":
-            success_key = True
+        if hasattr(key, "char"):
+            _handle_control_char(str(key.char))
     except AttributeError:
         pass
+
+
+def _start_stdin_key_listener():
+    def _listen():
+        while True:
+            char = sys.stdin.read(1)
+            if char == "":
+                return
+            _handle_control_char(char.strip().lower())
+
+    thread = threading.Thread(target=_listen, daemon=True)
+    thread.start()
+    return thread
 
 
 ##############################################################################
@@ -176,8 +196,20 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
     listener = keyboard.Listener(on_press=on_press)
     listener.start()
     active_env = env
+    if os.environ.get("AIC_EVAL_STDIN_KEY_LISTENER", "0").lower() in {
+        "1",
+        "true",
+        "yes",
+    }:
+        _start_stdin_key_listener()
     try:
         if FLAGS.eval_checkpoint_step:
+            eval_wait_for_reset_resume = os.environ.get(
+                "AIC_EVAL_WAIT_FOR_RESET_RESUME", "1"
+            ).lower() not in {"0", "false", "no"}
+            eval_auto_continue_after_episode = os.environ.get(
+                "AIC_EVAL_AUTO_CONTINUE_AFTER_EPISODE", "1"
+            ).lower() in {"1", "true", "yes"}
             success_counter = 0
             time_list = []
 
@@ -188,13 +220,51 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
             )
             agent = agent.replace(state=ckpt)
             print_green(f"Loaded evaluation checkpoint from {checkpoint_path}.")
+            env_config = getattr(env.unwrapped, "config", None)
+            max_eval_episode_steps = getattr(
+                env_config, "max_episode_length", config.max_traj_length
+            )
 
-            for episode in range(FLAGS.eval_n_trajs):
-                obs, _ = env.reset(options={"wait_for_reset_resume": True})
-                print("Reset finished. Resuming actor rollout.")
+            episode = 0
+            while episode < FLAGS.eval_n_trajs:
+                current_episode = episode + 1
+                obs, _ = env.reset(
+                    options={"wait_for_reset_resume": eval_wait_for_reset_resume}
+                )
+                reset_key = False  # clear flag leaked by the 'r' press that ended reset
+                success_key = False
+                print(
+                    f"Eval episode {current_episode}/{FLAGS.eval_n_trajs}: "
+                    "reset finished, starting rollout."
+                )
                 done = False
+                truncated = False
+                episode_step_count = 0
+                success_streak = 0
                 start_time = time.time()
                 while not done:
+                    if reset_key:
+                        reset_key = False
+                        success_key = False
+                        episode_step_count = 0
+                        success_streak = 0
+                        print("Reset requested. Waiting for reset resume key 'r'.")
+                        obs, _ = env.reset(
+                            options={
+                                "wait_for_reset_resume": eval_wait_for_reset_resume
+                            }
+                        )
+                        reset_key = False
+                        success_key = False
+                        done = False
+                        truncated = False
+                        start_time = time.time()
+                        print(
+                            f"Eval episode {current_episode}/{FLAGS.eval_n_trajs}: "
+                            "reset finished, restarting rollout."
+                        )
+                        continue
+
                     sampling_rng, key = jax.random.split(sampling_rng)
                     actions = agent.sample_actions(
                         observations=jax.device_put(obs), argmax=False, seed=key
@@ -202,21 +272,86 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
                     actions = np.asarray(jax.device_get(actions))
 
                     next_obs, reward, done, truncated, info = env.step(actions)
+                    episode_step_count += 1
+                    if "left" in info:
+                        info.pop("left")
+                    if "right" in info:
+                        info.pop("right")
+
+                    frame_succeed = bool(info.get("succeed", 0))
+                    success_streak = success_streak + 1 if frame_succeed else 0
+                    manual_success = success_key
+                    success_key = False
+                    streak_threshold_reached = success_streak >= 2
+                    success_threshold_reached = (
+                        streak_threshold_reached or manual_success
+                    )
+                    max_steps_reached = episode_step_count >= max_eval_episode_steps
+                    done = bool(
+                        truncated or success_threshold_reached or max_steps_reached
+                    )
+                    if done:
+                        if success_threshold_reached:
+                            reward = 1
+                            info["succeed"] = 1
+                        if manual_success:
+                            done_source = "manual_success"
+                            eval_status = "task_complete_manual"
+                        elif streak_threshold_reached:
+                            done_source = "success_streak"
+                            eval_status = "task_complete"
+                        elif truncated:
+                            done_source = "truncated"
+                            eval_status = "truncated"
+                        elif max_steps_reached:
+                            done_source = "max_eval_episode_steps"
+                            eval_status = "timeout"
+                        else:
+                            done_source = "env_done"
+                            eval_status = "env_done"
+                        info["done_source"] = done_source
+                        info["eval_status"] = eval_status
+
                     obs = next_obs
 
                     if done:
+                        if hasattr(env.unwrapped, "stop_motion"):
+                            env.unwrapped.stop_motion()
+
+                        dt = time.time() - start_time
+                        completed_episode = episode + 1
+                        print(
+                            f"Eval episode {completed_episode}/{FLAGS.eval_n_trajs}: "
+                            f"rollout ended, status={info.get('eval_status', 'unknown')}, "
+                            f"done_source={info.get('done_source', 'unknown')}, "
+                            f"steps={episode_step_count}, elapsed_sec={dt:.3f}, "
+                            f"reward={reward}, succeed={info.get('succeed', 0)}"
+                        )
+                        if "reward_lateral_error_m" in info:
+                            print(
+                                "Eval final errors: "
+                                f"lateral_m={info['reward_lateral_error_m']:.6f}, "
+                                f"axial_m={info['reward_axial_error_m']:.6f}, "
+                                f"angle_rad={info['reward_angle_error_rad']:.6f}, "
+                                f"success_streak={success_streak}"
+                            )
+
                         if reward:
-                            dt = time.time() - start_time
                             time_list.append(dt)
                             print(dt)
 
                         success_counter += reward
                         print(reward)
-                        print(f"{success_counter}/{episode + 1}")
-                        print("Episode finished. Press 'r' to begin reset.")
-                        while not reset_key:
-                            time.sleep(0.05)
+                        print(f"{success_counter}/{completed_episode}")
+                        if eval_auto_continue_after_episode:
+                            print("Episode finished. Auto-continuing reset.")
+                        else:
+                            print("Episode finished. Press 'r' to begin reset.")
+                            while not reset_key:
+                                time.sleep(0.05)
                         reset_key = False
+                        success_key = False
+                        episode += 1
 
             print(f"success rate: {success_counter / FLAGS.eval_n_trajs}")
             print(f"average time: {np.mean(time_list)}")
@@ -260,6 +395,12 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
         demo_transitions = []
 
         obs, _ = env.reset(options={"wait_for_reset_resume": True})
+        # The 'r' press that ended the reset wait also set reset_key=True;
+        # clear it so the first actor-loop iteration doesn't immediately
+        # request another reset. Similarly clear success_key so an 'h'
+        # pressed during the reset wait doesn't auto-mark the first step.
+        reset_key = False
+        success_key = False
         print("Reset finished. Resuming actor rollout.")
         done = False
 
@@ -290,6 +431,7 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
                 print("Reset requested. Waiting for reset resume key 'r'.")
                 obs, _ = env.reset(options={"wait_for_reset_resume": True})
                 reset_key = False
+                success_key = False
                 done = False
                 truncated = False
                 print("Reset finished. Resuming actor rollout.")
@@ -456,6 +598,7 @@ def actor(agent, data_store, intvn_data_store, env, sampling_rng):
                     already_intervened = False
                     obs, _ = env.reset(options={"wait_for_reset_resume": True})
                     reset_key = False
+                    success_key = False
                     print("Reset finished. Resuming actor rollout.")
 
             if (
@@ -676,7 +819,13 @@ def main(_):
     agent = jax.device_put(jax.tree_map(jnp.array, agent), sharding.replicate())
 
     if FLAGS.checkpoint_path is not None and os.path.exists(FLAGS.checkpoint_path):
-        input("Checkpoint path already exists. Press Enter to resume training.")
+        if FLAGS.eval_checkpoint_step:
+            print_green(
+                "Checkpoint path already exists; eval checkpoint mode continues "
+                "without waiting for Enter."
+            )
+        else:
+            input("Checkpoint path already exists. Press Enter to resume training.")
         ckpt, checkpoint_path = _restore_agent_state(
             FLAGS.checkpoint_path,
             agent.state,
